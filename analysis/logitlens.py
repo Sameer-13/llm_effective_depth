@@ -65,7 +65,7 @@ def run_logitlens(llm, prompts, K=5):
                 lout = out_logits.float().log_softmax(-1)
                 otopl = lout.topk(K, dim=-1).indices
 
-                for l in range(len(llm.model.layers)):
+                for l in range(len(get_layers(llm))):
                     llayer = layer_logs[l].log_softmax(-1)
 
                     kl_divs.append((llayer.exp() * (llayer - lout)).sum(-1).mean().detach())
@@ -83,8 +83,8 @@ def run_logitlens(llm, prompts, K=5):
         real_topk = topks[-1]
         other_topks = topks[:-1]
 
-        real_oh = F.one_hot(real_topk, llm.model.embed_tokens.weight.shape[0]).sum(-2)
-        overlaps = [(F.one_hot(ot.to(real_oh.device), llm.model.embed_tokens.weight.shape[0]).sum(-2).unsqueeze(-2).float() @ real_oh.unsqueeze(-1).float() / K).mean() for ot in other_topks]
+        real_oh = F.one_hot(real_topk, get_embed_tokens(llm).weight.shape[0]).sum(-2)
+        overlaps = [(F.one_hot(ot.to(real_oh.device), get_embed_tokens(llm).weight.shape[0]).sum(-2).unsqueeze(-2).float() @ real_oh.unsqueeze(-1).float() / K).mean() for ot in other_topks]
         overlaps = torch.stack(overlaps, dim=0)
         res_topk_overlaps.append(overlaps)
 
@@ -107,13 +107,13 @@ accu_kl_div = accu_kl_div / N_EXAMPLES
 accu_topk_overlaps = accu_topk_overlaps / N_EXAMPLES
 
 plt.figure(figsize=(5,2))
-plt.bar(range(len(llm.model.layers)), accu_kl_div.cpu().numpy())
+plt.bar(range(len(get_layers(llm))), accu_kl_div.cpu().numpy())
 plt.ylabel("KL Divergence")
 plt.xlabel("Layer")
 plt.savefig(os.path.join(target_dir, f"{model_name}_logitlens_kl_div.pdf"), bbox_inches="tight")
 
 plt.figure(figsize=(5,2))
-plt.bar(range(len(llm.model.layers)), accu_topk_overlaps.cpu().numpy())
+plt.bar(range(len(get_layers(llm))), accu_topk_overlaps.cpu().numpy())
 plt.ylabel("Overlap")
 plt.xlabel("Layer")
 plt.savefig(os.path.join(target_dir, f"{model_name}_logitlens_topk_overlaps.pdf"), bbox_inches="tight")
