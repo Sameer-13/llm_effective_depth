@@ -34,70 +34,100 @@ _n_layers = len(_layers)
 # ─────────────────────────────────────────────────────────────────────
 
 
-def get_attn_module(layer):
+def probe_layer_attrs(llm, layers, prompt):
     """
-    Return the attention sub-module. Handles naming across model families:
-      Llama / Qwen / Gemma all use self_attn, but we probe to be safe.
+    Probe what nnsight can actually intercept for this model.
+    Tests both .input and .inputs to find which one works.
+    Reports results without crashing.
     """
-    raw = layer._module
-    for candidate in ["self_attn", "attn", "attention"]:
-        if hasattr(raw, candidate):
-            return getattr(layer, candidate)
-    raise AttributeError(
-        f"Cannot find attention sub-module in {type(raw).__name__}. "
-        f"Children: {[n for n, _ in raw.named_children()]}"
-    )
+    print("Probing layer attribute names and nnsight access patterns...")
+
+    # Test 1: can we read layer input via .input[0]?
+    try:
+        with torch.no_grad():
+            with llm.trace(prompt, remote=llm.remote):
+                val = layers[0].input[0].shape.save()
+        print(f"  layer.input[0]     shape : {val}  ✓")
+        input_attr = "input[0]"
+    except Exception as e:
+        print(f"  layer.input[0]     → FAILED: {str(e)[:80]}")
+        input_attr = None
+
+    # Test 2: can we read layer input via .inputs[0][0]?
+    if input_attr is None:
+        try:
+            with torch.no_grad():
+                with llm.trace(prompt, remote=llm.remote):
+                    val = layers[0].inputs[0][0].shape.save()
+            print(f"  layer.inputs[0][0] shape : {val}  ✓")
+            input_attr = "inputs[0][0]"
+        except Exception as e:
+            print(f"  layer.inputs[0][0] → FAILED: {str(e)[:80]}")
+
+    # Test 3: can we read layer output via .output[0]?
+    try:
+        with torch.no_grad():
+            with llm.trace(prompt, remote=llm.remote):
+                val = layers[0].output[0].shape.save()
+        print(f"  layer.output[0]    shape : {val}  ✓")
+    except Exception as e:
+        print(f"  layer.output[0]    → FAILED: {str(e)[:80]}")
+
+    # Test 4: check mlp sub-module
+    for mlp_name in ["mlp", "feed_forward", "ffn"]:
+        if hasattr(layers[0]._module, mlp_name):
+            try:
+                mlp_mod = getattr(layers[0], mlp_name)
+                with torch.no_grad():
+                    with llm.trace(prompt, remote=llm.remote):
+                        val = mlp_mod.output.shape.save()
+                print(f"  layer.{mlp_name}.output shape : {val}  ✓")
+                break
+            except Exception as e:
+                print(f"  layer.{mlp_name}.output → FAILED: {str(e)[:80]}")
+
+    print(f"  Detected input access pattern: {input_attr}")
+    return input_attr
+
+
+def get_layer_input(layer, input_attr):
+    """Get the residual stream coming INTO this layer."""
+    if input_attr == "input[0]":
+        return layer.input[0]
+    else:
+        return layer.inputs[0][0]
 
 
 def get_mlp_module(layer):
-    """Return the MLP sub-module."""
+    """Return the MLP sub-module, handling naming differences."""
     raw = layer._module
     for candidate in ["mlp", "feed_forward", "ffn"]:
         if hasattr(raw, candidate):
             return getattr(layer, candidate)
     raise AttributeError(
-        f"Cannot find MLP sub-module in {type(raw).__name__}. "
+        f"No MLP sub-module found in {type(raw).__name__}. "
         f"Children: {[n for n, _ in raw.named_children()]}"
     )
 
 
-def get_attn_output_tensor(attn_module):
-    """
-    Return the attention hidden-state output as a plain tensor.
-    Some models return a tuple (hidden, cache, ...), others a plain tensor.
-    """
-    out = attn_module.output
-    if isinstance(out, tuple):
-        return out[0]
-    return out
-
-
-def probe_layer_attrs(llm, layers, prompt):
-    """Quick trace to confirm attribute names work before the full run."""
-    print("Probing layer attribute names...")
-    try:
-        with torch.no_grad():
-            with llm.trace(prompt, remote=llm.remote):
-                l0   = layers[0]
-                attn = get_attn_module(l0)
-                mlp  = get_mlp_module(l0)
-                a_shape = get_attn_output_tensor(attn).shape.save()
-                m_shape = mlp.output.shape.save()
-                r_in_s  = l0.inputs[0][0].shape.save()
-                r_out_s = l0.output[0].shape.save()
-        print(f"  layer input  shape : {r_in_s}")
-        print(f"  layer output shape : {r_out_s}")
-        print(f"  attn  output shape : {a_shape}")
-        print(f"  mlp   output shape : {m_shape}")
-        print("  ✓ Attribute probe OK")
-        return True
-    except Exception as e:
-        print(f"  ✗ Probe failed: {type(e).__name__}: {str(e)[:300]}")
-        return False
-
-
 @ndif_cache_wrapper
-def analyze_norms(llm, prompts):
+def analyze_norms(llm, prompts, input_attr):
+    """
+    Compute residual stream and sublayer contribution norms.
+
+    Strategy: derive attention contribution from residual differences
+    rather than hooking into self_attn.output directly. This is more
+    reliable across model families.
+
+    For a pre-LN transformer:
+        h_after_attn  = layer_output_after_attention_residual_add
+        attn_contrib  = h_after_attn - h_in
+        mlp_contrib   = layer_output - h_after_attn
+        layer_contrib = layer_output - h_in
+
+    nnsight exposes intermediate states via sub-module hooks.
+    We hook the MLP input (= h_after_attn) to get the split point.
+    """
     layers   = _layers
     n_layers = _n_layers
 
@@ -128,9 +158,9 @@ def analyze_norms(llm, prompts):
             for pi, prompt in enumerate(prompts):
                 print(f"[{pi+1}/{len(prompts)}]")
                 with llm.trace(prompt, remote=llm.remote):
-                    residual_log = []
-                    att_outputs  = []
-                    mlp_outputs  = []
+                    residual_log  = []   # h_0, h_1, ..., h_L  (layer outputs)
+                    mlp_input_log = []   # h_after_attn for each layer
+                    mlp_output_log = []  # mlp output for each layer
 
                     att_cos      = []
                     mlp_cos      = []
@@ -142,36 +172,44 @@ def analyze_norms(llm, prompts):
                     relative_contribution_layer = []
 
                     for li, layer in enumerate(layers):
-                        attn = get_attn_module(layer)
-                        mlp  = get_mlp_module(layer)
+                        mlp = get_mlp_module(layer)
 
-                        r_in  = layer.inputs[0][0].detach()
+                        # h coming into this layer
+                        r_in = get_layer_input(layer, input_attr).detach()
+
+                        # h after the full layer (attn residual + mlp residual)
                         r_out = layer.output[0].detach()
-                        a_out = get_attn_output_tensor(attn).detach()
+
+                        # h after attn residual add = mlp's input
+                        # In pre-LN: mlp takes the normed version, but the
+                        # residual add happens BEFORE norm, so mlp.input[0]
+                        # is the normed state. We want the un-normed residual,
+                        # which we can get as r_out - mlp.output
                         m_out = mlp.output.detach()
+
+                        # h_after_attn = r_out - mlp_contribution
+                        h_after_attn = (r_out - m_out).detach()
+
+                        # contributions
+                        a_out      = (h_after_attn - r_in).detach()   # attn contribution
+                        layer_diff = (r_out - r_in).detach()           # full layer contribution
 
                         if li == 0:
                             residual_log.clear()
                             residual_log.append(r_in)
 
                         residual_log.append(r_out)
-                        att_outputs.append(a_out)
-                        mlp_outputs.append(m_out)
+                        mlp_input_log.append(h_after_attn)
+                        mlp_output_log.append(m_out)
 
                         relative_contribution_att.append(
                             a_out.norm(dim=-1).cpu().float()
                             / r_in.norm(dim=-1).clamp(min=1e-6).cpu().float()
                         )
-
-                        mlp_input = (a_out + r_in).detach()
-
                         relative_contribution_mlp.append(
                             m_out.norm(dim=-1).cpu().float()
-                            / mlp_input.norm(dim=-1).clamp(min=1e-6).cpu().float()
+                            / h_after_attn.norm(dim=-1).clamp(min=1e-6).cpu().float()
                         )
-
-                        layer_diff = (r_out - r_in).detach()
-
                         relative_contribution_layer.append(
                             layer_diff.norm(dim=-1).cpu().float()
                             / r_in.norm(dim=-1).clamp(min=1e-6).cpu().float()
@@ -181,7 +219,7 @@ def analyze_norms(llm, prompts):
                             F.cosine_similarity(a_out, r_in, dim=-1).sum(1).cpu().float()
                         )
                         mlp_cos.append(
-                            F.cosine_similarity(m_out, mlp_input, dim=-1).sum(1).cpu().float()
+                            F.cosine_similarity(m_out, h_after_attn, dim=-1).sum(1).cpu().float()
                         )
                         layer_cos.append(
                             F.cosine_similarity(layer_diff, r_in, dim=-1).sum(1).cpu().float()
@@ -190,9 +228,9 @@ def analyze_norms(llm, prompts):
                             F.cosine_similarity(r_out, r_in, dim=-1).sum(1).cpu().float()
                         )
 
-                    r = torch.cat(residual_log, dim=0).norm(dim=-1).cpu().float()
-                    a = torch.cat(att_outputs,  dim=0).norm(dim=-1).cpu().float()
-                    m = torch.cat(mlp_outputs,  dim=0).norm(dim=-1).cpu().float()
+                    r = torch.cat(residual_log,   dim=0).norm(dim=-1).cpu().float()
+                    a = torch.cat(mlp_input_log,  dim=0).norm(dim=-1).cpu().float()
+                    m = torch.cat(mlp_output_log, dim=0).norm(dim=-1).cpu().float()
 
                     res_norms = r.sum(dim=1) + res_norms_all
                     att_norms = a.sum(dim=1) + att_norms_all
@@ -266,10 +304,20 @@ def analyze_norms(llm, prompts):
 prompts = list(LegalDataset())
 print(f"Loaded {len(prompts)} legal prompts.")
 
-# ── Probe to confirm attribute names before expensive run ─────────────
-probe_ok = probe_layer_attrs(llm, _layers, prompts[0])
-if not probe_ok:
-    print("WARNING: probe failed — the run may still crash. Check attribute names.")
+# ── Probe to find correct nnsight input access pattern ────────────────
+# Delete old cache so we don't reuse a broken result
+import shutil
+cache_dir = "cache/ndif_cache/analyze_norms"
+if os.path.exists(cache_dir):
+    shutil.rmtree(cache_dir)
+    print("Cleared old cache.")
+
+input_attr = probe_layer_attrs(llm, _layers, prompts[0])
+if input_attr is None:
+    raise RuntimeError(
+        "Could not determine how to access layer inputs for this model. "
+        "Check the probe output above."
+    )
 
 # ── Run ───────────────────────────────────────────────────────────────
 (
@@ -282,7 +330,7 @@ if not probe_ok:
     max_relative_contribution_mlp,
     layer_cos_all, att_cos_all,
     mlp_cos_all, layer_io_cos_all
-) = analyze_norms(llm, prompts)
+) = analyze_norms(llm, prompts, input_attr)
 
 # ── Plotting ──────────────────────────────────────────────────────────
 W_BAR   = 1.1
