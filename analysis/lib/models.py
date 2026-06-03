@@ -12,7 +12,7 @@ local_model_table = {
     "qwen2.5_14b":            ("Qwen/Qwen2.5-14B",               True,  "language"),
     "qwen2.5_7b":             ("Qwen/Qwen2.5-7B",                True,  "language"),
     "qwen2.5_1.5b":           ("Qwen/Qwen2.5-1.5B",              True,  "language"),
-    "qwen3_8b":               ("Qwen/Qwen3-8B",                  True,  "language"),
+    "qwen3_8b":               ("Qwen/Qwen3-8B",                  False,  "language"),
     "qwen3_14b":              ("Qwen/Qwen3-14B",                 True,  "language"),
     "qwen3_32b":              ("Qwen/Qwen3-32B",                 True,  "language"),
     "llama_3.1_8b":           ("meta-llama/Meta-Llama-3.1-8B",   True,  "language"),
