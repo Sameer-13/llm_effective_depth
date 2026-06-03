@@ -18,6 +18,7 @@ from lib.datasets import GSM8K
 from lib.ndif_cache import ndif_cache_wrapper
 
 from lib.model_compat import get_layers, get_norm, get_lm_head, get_embed_tokens, set_eval
+from lib.datasets import LegalDataset
 
 N_EXAMPLES = 20
 # model_name = "llama_3.1_8b"
@@ -170,9 +171,11 @@ def analyze_norms(llm, prompts):
 
 
 prompts = []
-for i, prompt in enumerate(GSM8K()):
-    if i >= N_EXAMPLES:
-        break
+for i, prompt in enumerate(LegalDataset(
+    json_path="/path/to/your/samples.json",
+    include_steps=False,
+    use_chat_template=True,
+)):
     prompts.append(prompt)
 
 

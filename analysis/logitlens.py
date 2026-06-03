@@ -17,7 +17,7 @@ from lib.model_compat import get_layers, get_norm, get_lm_head
 import sys
 
 from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
-
+from lib.datasets import LegalDataset
 
 if len(sys.argv) != 2:
     print(f"Usage: python {sys.argv[0]} model")
@@ -91,7 +91,7 @@ def run_logitlens(llm, prompts, K=5):
     return [d.cpu() for d in res_kl_divs], res_topk_overlaps
 
 
-N_EXAMPLES = 20
+N_EXAMPLES = len(legal_dataset)
 
 accu_kl_div = 0
 accu_topk_overlaps = 0

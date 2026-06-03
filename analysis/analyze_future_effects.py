@@ -20,8 +20,6 @@ from lib.ndif_cache import ndif_cache_wrapper
 from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
 
 
-
-
 def plot_layer_diffs(dall):
     fig, ax = plt.subplots(figsize=(10,3))
     im = ax.imshow(dall.float().cpu().numpy(), vmin=0, vmax=1, interpolation="nearest")
@@ -54,11 +52,9 @@ def merge_io(intervened, orig, t: Optional[int] = None, no_skip_front: int = 1):
     return torch.cat(outs, dim=1)
 
 
-def intervene_layer(layer, t, part, no_skip_front):
+def intervene_layer(layer, t: Optional[int], part: str, no_skip_front: int):
     if part == "layer":
         raw_output = layer.output
-
-        # Handle models where layer output is a tuple (e.g. Gemma 4)
         if isinstance(raw_output, tuple):
             hidden = raw_output[0]
             rest   = raw_output[1:]
@@ -66,9 +62,8 @@ def intervene_layer(layer, t, part, no_skip_front):
             layer.output = (new_hidden,) + rest
         else:
             layer.output = merge_io(
-                layer.inputs[0][0], raw_output[0], t, no_skip_front
+                layer.inputs[0][0], layer.output[0], t, no_skip_front
             ),
-
     elif part == "mlp":
         layer.mlp.output = merge_io(
             torch.zeros_like(layer.mlp.output),
@@ -168,11 +163,10 @@ def run(llm, model_name):
         d_max = torch.zeros([1])
         dout_max = torch.zeros([1])
         for idx, prompt in enumerate(LegalDataset()):
-            print(prompt)
+            # print(prompt)
             diff_now, diff_out = test_future_max_effect(llm, prompt, part=what)
             d_max = torch.max(d_max, diff_now)
             dout_max = torch.max(dout_max, diff_out)
-
             dall.append(diff_now)
             if idx == N_EXAMPLES - 1:
                 break
