@@ -17,6 +17,8 @@ from lib.datasets import LegalDataset
 from tqdm import tqdm
 from lib.ndif_cache import ndif_cache_wrapper
 
+from lib.model_compat import get_layers, get_lm_head
+
 
 def plot_layer_diffs(dall):
     fig, ax = plt.subplots(figsize=(10,3))
@@ -50,13 +52,34 @@ def merge_io(intervened, orig, t: Optional[int] = None, no_skip_front: int = 1):
     return torch.cat(outs, dim=1)
 
 
-def intervene_layer(layer, t: Optional[int], part: str, no_skip_front: int):
+def intervene_layer(layer, t, part, no_skip_front):
     if part == "layer":
-        layer.output = merge_io(layer.inputs[0][0], layer.output[0], t, no_skip_front),
+        raw_output = layer.output
+
+        # Handle models where layer output is a tuple (e.g. Gemma 4)
+        if isinstance(raw_output, tuple):
+            hidden = raw_output[0]
+            rest   = raw_output[1:]
+            new_hidden = merge_io(layer.inputs[0][0], hidden, t, no_skip_front)
+            layer.output = (new_hidden,) + rest
+        else:
+            layer.output = merge_io(
+                layer.inputs[0][0], raw_output[0], t, no_skip_front
+            ),
+
     elif part == "mlp":
-        layer.mlp.output = merge_io(torch.zeros_like(layer.mlp.output), layer.mlp.output, t, no_skip_front)
+        layer.mlp.output = merge_io(
+            torch.zeros_like(layer.mlp.output),
+            layer.mlp.output, t, no_skip_front
+        )
     elif part == "attention":
-        layer.self_attn.output = merge_io(torch.zeros_like(layer.self_attn.output[0]), layer.self_attn.output[0], t, no_skip_front), layer.self_attn.output[1]
+        layer.self_attn.output = (
+            merge_io(
+                torch.zeros_like(layer.self_attn.output[0]),
+                layer.self_attn.output[0], t, no_skip_front
+            ),
+            layer.self_attn.output[1]
+        )
     else:
         raise ValueError(f"Invalid part: {part}")
     
@@ -77,7 +100,7 @@ def test_effect(llm, prompt, positions, part, no_skip_front=1):
         with torch.no_grad():
             residual_log = []
             with llm.trace(prompt) as tracer:
-                for i, layer in enumerate(llm.model.layers):
+                for i, layer in enumerate(get_layers(llm)):
                     if i == 0:
                         residual_log.clear()
                     residual_log.append(layer.output[0].detach().cpu().float() - layer.inputs[0][0].detach().cpu().float())
@@ -90,14 +113,14 @@ def test_effect(llm, prompt, positions, part, no_skip_front=1):
                 diffs = []
                 out_diffs = []
 
-                for lskip in range(len(llm.model.layers)):
-                # with session.iter(range(len(llm.model.layers))) as lskip:
+                for lskip in range(len(get_layers(llm))):
+                # with session.iter(range(len(get_layers(llm)))) as lskip:
                     with llm.trace(prompt) as tracer:
                         new_logs = []
 
-                        intervene_layer(llm.model.layers[lskip], t, part, no_skip_front)
+                        intervene_layer(get_layers(llm)[lskip], t, part, no_skip_front)
 
-                        for i, layer in enumerate(llm.model.layers):
+                        for i, layer in enumerate(get_layers(llm)):
                             new_logs.append((layer.output[0].detach().cpu().float() - layer.inputs[0][0].detach().cpu().float()))#.cpu())
 
                         new_logs = torch.cat(new_logs, dim=0).float()

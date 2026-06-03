@@ -17,7 +17,7 @@ from tqdm import tqdm
 from lib.ndif_cache import ndif_cache_wrapper
 from analyze_future_effects import plot_layer_diffs, plot_logit_diffs, merge_io, get_future
 
-
+from lib.model_compat import get_layers
 
 @ndif_cache_wrapper
 def test_local_effect(llm, prompt, positions, no_skip_front=1):
@@ -28,7 +28,7 @@ def test_local_effect(llm, prompt, positions, no_skip_front=1):
             contribution_log = []
             raw_out_logs = []
             with llm.trace(prompt) as tracer:
-                for i, layer in enumerate(llm.model.layers):
+                for i, layer in enumerate(get_layers(llm)):
                     if i == 0:
                         contribution_log.clear()
                         raw_out_logs.clear()
@@ -41,11 +41,11 @@ def test_local_effect(llm, prompt, positions, no_skip_front=1):
             for t in positions:
                 diffs = []
 
-                for lskip in range(len(llm.model.layers)):
+                for lskip in range(len(get_layers(llm))):
                     with llm.trace(prompt) as tracer:
                         new_logs = []
 
-                        for i, layer in enumerate(llm.model.layers):
+                        for i, layer in enumerate(get_layers(llm)):
                             new_logs.append((layer.output[0].detach().cpu().float() - layer.inputs[0][0].detach().cpu().float()))#.cpu())
                             if i >= lskip:
                                 layer.output = merge_io(raw_out_logs[i] - contribution_log[lskip], raw_out_logs[i], t, no_skip_front),

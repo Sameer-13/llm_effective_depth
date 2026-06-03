@@ -17,6 +17,8 @@ from lib.nnsight_tokenize import tokenize
 from lib.datasets import GSM8K
 from lib.ndif_cache import ndif_cache_wrapper
 
+from lib.model_compat import get_layers
+
 
 N_EXAMPLES = 20
 # model_name = "llama_3.1_8b"
@@ -77,7 +79,7 @@ def analyze_norms(llm, prompts):
                     relative_contribution_mlp = []
                     relative_contribution_layer = []
 
-                    for i, layer in enumerate(llm.model.layers):
+                    for i, layer in enumerate(get_layers(llm)):
                         if i == 0:
                             residual_log.clear()
                             residual_log.append(layer.inputs[0][0].detach())
@@ -189,9 +191,9 @@ def set_xlim(l):
 
 plt.figure(figsize=(W,H))
 bars = []
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], att_norms.float().cpu().numpy(), label="Attention: $||\\bm{a}_l||_2$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], mlp_norms.float().cpu().numpy(), label="MLP: $||\\bm{m}_l||_2$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], res_norms[:-1].float().cpu().numpy(), label="Residual: $||\\bm{h}_{l}||_2$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], att_norms.float().cpu().numpy(), label="Attention: $||\\bm{a}_l||_2$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], mlp_norms.float().cpu().numpy(), label="MLP: $||\\bm{m}_l||_2$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], res_norms[:-1].float().cpu().numpy(), label="Residual: $||\\bm{h}_{l}||_2$", width=W_BAR))
 # plt.xticks([x for x in range(len(llm.model.layers)) if x % 2 == 0], [f"L{i}" for i in range(len(llm.model.layers)) if i % 2 == 0], fontsize=12)
 plt.xlabel("Layer index ($l$)")
 plt.ylabel("Mean Norm")
@@ -202,9 +204,9 @@ plt.savefig(os.path.join(target_dir, f"{model_name}_mean_norms.pdf"), bbox_inche
 
 plt.figure(figsize=(W,H))
 bars = []
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], max_att_norms.float().cpu().numpy(), label="Attention $\\bm{a}_l$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], max_mlp_norms.float().cpu().numpy(), label="MLP $\\bm{m}_l$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], max_res_norms[:-1].float().cpu().numpy(), label="Residual $\\bm{h}_{l}$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], max_att_norms.float().cpu().numpy(), label="Attention $\\bm{a}_l$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], max_mlp_norms.float().cpu().numpy(), label="MLP $\\bm{m}_l$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], max_res_norms[:-1].float().cpu().numpy(), label="Residual $\\bm{h}_{l}$", width=W_BAR))
 # plt.xticks([x for x in range(len(llm.model.layers)) if x % 2 == 0], [f"L{i}" for i in range(len(llm.model.layers)) if i % 2 == 0], fontsize=12)
 plt.xlabel("Layer index ($l$)")
 plt.ylabel("Max Norm")
@@ -215,9 +217,9 @@ plt.savefig(os.path.join(target_dir, f"{model_name}_max_norms.pdf"), bbox_inches
 
 plt.figure(figsize=(W,H))
 bars = []
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], mean_relative_contribution_att.float().cpu().numpy(), label="Attention: $||\\bm{a}_l||_2/||\\bm{h}_l||_2$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], mean_relative_contribution_mlp.float().cpu().numpy(), label="MLP: $||\\bm{m}_l||_2/||\\bm{h}_l + \\bm{a}_l||_2$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], mean_relative_contribution_layer.float().cpu().numpy(), label="Attention + MLP: $||\\bm{a}_l + \\bm{m}_l||_2/||\\bm{h}_{l}||_2$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], mean_relative_contribution_att.float().cpu().numpy(), label="Attention: $||\\bm{a}_l||_2/||\\bm{h}_l||_2$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], mean_relative_contribution_mlp.float().cpu().numpy(), label="MLP: $||\\bm{m}_l||_2/||\\bm{h}_l + \\bm{a}_l||_2$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], mean_relative_contribution_layer.float().cpu().numpy(), label="Attention + MLP: $||\\bm{a}_l + \\bm{m}_l||_2/||\\bm{h}_{l}||_2$", width=W_BAR))
 # plt.xticks([x for x in range(len(llm.model.layers)) if x % 2 == 0], [f"L{i}" for i in range(len(llm.model.layers)) if i % 2 == 0], fontsize=12)
 plt.legend()
 sort_zorder(bars)
@@ -230,8 +232,8 @@ plt.savefig(os.path.join(target_dir, f"{model_name}_mean_relative_contribution.p
 
 plt.figure(figsize=(W,H))
 bars = []
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], max_relative_contribution_att.float().cpu().numpy(), label="Attention $\\bm{a}_l$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], max_relative_contribution_mlp.float().cpu().numpy(), label="MLP $\\bm{m}_l$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], max_relative_contribution_att.float().cpu().numpy(), label="Attention $\\bm{a}_l$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], max_relative_contribution_mlp.float().cpu().numpy(), label="MLP $\\bm{m}_l$", width=W_BAR))
 # plt.xticks([x for x in range(len(llm.model.layers)) if x % 2 == 0], [f"L{i}" for i in range(len(llm.model.layers)) if i % 2 == 0], fontsize=12)
 plt.ylim(0, 2)
 plt.xlabel("Layer index ($l$)")
@@ -243,9 +245,9 @@ plt.savefig(os.path.join(target_dir, f"{model_name}_max_relative_contribution.pd
 
 plt.figure(figsize=(W,H))
 bars = []
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], att_cos_all.float().cpu().numpy(), label="Attention: $\\text{cossim}(\\bm{a}_l, \\bm{h}_l)$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], mlp_cos_all.float().cpu().numpy(), label="MLP: $\\text{cossim}(\\bm{m}_l, \\bm{h}_l + \\bm{a}_l)$", width=W_BAR))
-bars.append(plt.bar([x for x in range(len(llm.model.layers))], layer_cos_all.float().cpu().numpy(), label="Attention + MLP: $\\text{cossim}(\\bm{a}_l + \\bm{m}_l, \\bm{h}_l)$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], att_cos_all.float().cpu().numpy(), label="Attention: $\\text{cossim}(\\bm{a}_l, \\bm{h}_l)$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], mlp_cos_all.float().cpu().numpy(), label="MLP: $\\text{cossim}(\\bm{m}_l, \\bm{h}_l + \\bm{a}_l)$", width=W_BAR))
+bars.append(plt.bar([x for x in range(len(get_layers(llm)))], layer_cos_all.float().cpu().numpy(), label="Attention + MLP: $\\text{cossim}(\\bm{a}_l + \\bm{m}_l, \\bm{h}_l)$", width=W_BAR))
 # plt.xticks([x for x in range(len(llm.model.layers)) if x % 2 == 0], [f"L{i}" for i in range(len(llm.model.layers)) if i % 2 == 0], fontsize=12)
 plt.xlabel("Layer index ($l$)")
 # plt.ylabel("1-cosine similarity")
@@ -256,7 +258,7 @@ set_xlim(len(llm.model.layers))
 plt.savefig(os.path.join(target_dir, f"{model_name}_avg_cossims.pdf"), bbox_inches="tight")
 
 plt.figure(figsize=(W,H))
-plt.bar([x for x in range(len(llm.model.layers))], layer_io_cos_all.float().cpu().numpy(), label="Attention + MLP $\\bm{a}_l + \\bm{m}_l$")
+plt.bar([x for x in range(len(get_layers(llm)))], layer_io_cos_all.float().cpu().numpy(), label="Attention + MLP $\\bm{a}_l + \\bm{m}_l$")
 plt.xlabel("Layer index ($l$)")
 # plt.ylabel("1-cosine similarity")
 plt.ylabel("Cosine similarity")

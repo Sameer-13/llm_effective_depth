@@ -12,6 +12,8 @@ from lib.datasets import LegalDataset
 from lib.ndif_cache import ndif_cache_wrapper
 import torch.nn.functional as F
 
+from lib.model_compat import get_layers, get_norm, get_lm_head
+
 import sys
 
 if len(sys.argv) != 2:
@@ -48,9 +50,13 @@ def run_logitlens(llm, prompts, K=5):
                 topks = []
                 layer_logs = []        
                 with llm.trace(prompt):
-                    for l in range(len(llm.model.layers)):
-                        tap = llm.model.layers[l].inputs[0][0]
-                        layer_logs.append(llm.lm_head(llm.model.norm(tap)).detach().float())
+                    layers = get_layers(llm)
+                    norm   = get_norm(llm)
+                    head   = get_lm_head(llm)
+                    
+                    for l in range(len(layers)):
+                        tap = layers[l].inputs[0][0]
+                        layer_logs.append(head(norm(tap)).detach().float())
                     out_logits = llm.output.logits
 
                 lout = out_logits.float().log_softmax(-1)
