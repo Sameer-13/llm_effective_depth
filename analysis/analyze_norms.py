@@ -1,19 +1,17 @@
 from lib.matplotlib_config import sort_zorder
 import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import os
 import sys
+import shutil
 import nnsight
 nnsight.CONFIG.API.APIKEY = os.environ["NDIF_TOKEN"]
 import torch
 import torch.nn.functional as F
-from nnsight import LanguageModel
 
 from lib.models import create_model
-from lib.nnsight_tokenize import tokenize
 from lib.ndif_cache import ndif_cache_wrapper
-from lib.model_compat import get_layers, get_norm, get_lm_head, get_embed_tokens, set_eval
+from lib.model_compat import get_layers, set_eval
 from lib.datasets import LegalDataset
 
 N_EXAMPLES = 10
@@ -28,74 +26,10 @@ target_dir = "out/norms"
 set_eval(llm)
 os.makedirs(target_dir, exist_ok=True)
 
-# ── Resolve model paths BEFORE any session/trace block ───────────────
+# ── Resolve model paths BEFORE any trace block ───────────────────────
 _layers   = get_layers(llm)
 _n_layers = len(_layers)
 # ─────────────────────────────────────────────────────────────────────
-
-
-def probe_layer_attrs(llm, layers, prompt):
-    """
-    Probe what nnsight can actually intercept for this model.
-    Tests both .input and .inputs to find which one works.
-    Reports results without crashing.
-    """
-    print("Probing layer attribute names and nnsight access patterns...")
-
-    # Test 1: can we read layer input via .input[0]?
-    try:
-        with torch.no_grad():
-            with llm.trace(prompt, remote=llm.remote):
-                val = layers[0].input[0].shape.save()
-        print(f"  layer.input[0]     shape : {val}  ✓")
-        input_attr = "input[0]"
-    except Exception as e:
-        print(f"  layer.input[0]     → FAILED: {str(e)[:80]}")
-        input_attr = None
-
-    # Test 2: can we read layer input via .inputs[0][0]?
-    if input_attr is None:
-        try:
-            with torch.no_grad():
-                with llm.trace(prompt, remote=llm.remote):
-                    val = layers[0].inputs[0][0].shape.save()
-            print(f"  layer.inputs[0][0] shape : {val}  ✓")
-            input_attr = "inputs[0][0]"
-        except Exception as e:
-            print(f"  layer.inputs[0][0] → FAILED: {str(e)[:80]}")
-
-    # Test 3: can we read layer output via .output[0]?
-    try:
-        with torch.no_grad():
-            with llm.trace(prompt, remote=llm.remote):
-                val = layers[0].output[0].shape.save()
-        print(f"  layer.output[0]    shape : {val}  ✓")
-    except Exception as e:
-        print(f"  layer.output[0]    → FAILED: {str(e)[:80]}")
-
-    # Test 4: check mlp sub-module
-    for mlp_name in ["mlp", "feed_forward", "ffn"]:
-        if hasattr(layers[0]._module, mlp_name):
-            try:
-                mlp_mod = getattr(layers[0], mlp_name)
-                with torch.no_grad():
-                    with llm.trace(prompt, remote=llm.remote):
-                        val = mlp_mod.output.shape.save()
-                print(f"  layer.{mlp_name}.output shape : {val}  ✓")
-                break
-            except Exception as e:
-                print(f"  layer.{mlp_name}.output → FAILED: {str(e)[:80]}")
-
-    print(f"  Detected input access pattern: {input_attr}")
-    return input_attr
-
-
-def get_layer_input(layer, input_attr):
-    """Get the residual stream coming INTO this layer."""
-    if input_attr == "input[0]":
-        return layer.input[0]
-    else:
-        return layer.inputs[0][0]
 
 
 def get_mlp_module(layer):
@@ -110,193 +44,256 @@ def get_mlp_module(layer):
     )
 
 
+def probe_layer_attrs(llm, layers, prompt):
+    """Probe what nnsight can intercept. Returns the input access pattern."""
+    print("Probing layer attribute names...")
+
+    # Test .input[0]
+    try:
+        with torch.no_grad():
+            with llm.trace(prompt, remote=llm.remote):
+                shp = layers[0].input[0].shape.save()
+        print(f"  layer.input[0]   shape : {shp}  ✓")
+        input_attr = "input"
+    except Exception as e:
+        print(f"  layer.input[0]   → FAILED: {str(e)[:80]}")
+        input_attr = None
+
+    # Fall back to .inputs[0][0]
+    if input_attr is None:
+        try:
+            with torch.no_grad():
+                with llm.trace(prompt, remote=llm.remote):
+                    shp = layers[0].inputs[0][0].shape.save()
+            print(f"  layer.inputs[0][0] shape : {shp}  ✓")
+            input_attr = "inputs"
+        except Exception as e:
+            print(f"  layer.inputs[0][0] → FAILED: {str(e)[:80]}")
+
+    # Test layer.output[0]
+    try:
+        with torch.no_grad():
+            with llm.trace(prompt, remote=llm.remote):
+                shp = layers[0].output[0].shape.save()
+        print(f"  layer.output[0]  shape : {shp}  ✓")
+    except Exception as e:
+        print(f"  layer.output[0]  → FAILED: {str(e)[:80]}")
+
+    # Test mlp.output
+    try:
+        mlp = get_mlp_module(layers[0])
+        with torch.no_grad():
+            with llm.trace(prompt, remote=llm.remote):
+                shp = mlp.output.shape.save()
+        print(f"  layer.mlp.output shape : {shp}  ✓")
+    except Exception as e:
+        print(f"  layer.mlp.output → FAILED: {str(e)[:80]}")
+
+    print(f"  Detected input access pattern: {input_attr}")
+    return input_attr
+
+
+def trace_one_prompt(llm, prompt, input_attr):
+    """
+    Run ONE trace, save the tensors we need, return them as plain tensors.
+
+    Crucially: we DO NOT use llm.session() and we explicitly .save() every
+    tensor. This avoids the nnsight proxy-lifecycle issues that cause
+    MissedProviderError in newer nnsight versions.
+    """
+    layers = _layers
+    n_layers = _n_layers
+
+    saved_layer_in   = []
+    saved_layer_out  = []
+    saved_mlp_out    = []
+
+    with torch.no_grad():
+        with llm.trace(prompt, remote=llm.remote):
+            for li, layer in enumerate(layers):
+                mlp = get_mlp_module(layer)
+                if input_attr == "input":
+                    li_in = layer.input[0]
+                else:
+                    li_in = layer.inputs[0][0]
+
+                saved_layer_in.append(li_in.save())
+                saved_layer_out.append(layer.output[0].save())
+                saved_mlp_out.append(mlp.output.save())
+
+    # After trace exits, .value attribute holds the real tensor
+    def realize(x):
+        return x.value if hasattr(x, 'value') else x
+
+    layer_in_t  = [realize(t).detach() for t in saved_layer_in]
+    layer_out_t = [realize(t).detach() for t in saved_layer_out]
+    mlp_out_t   = [realize(t).detach() for t in saved_mlp_out]
+
+    return layer_in_t, layer_out_t, mlp_out_t
+
+
+def to_3d(t):
+    """Ensure tensor is [batch, seq, hidden]."""
+    if t.dim() == 2:
+        return t.unsqueeze(0)
+    return t
+
+
 @ndif_cache_wrapper
 def analyze_norms(llm, prompts, input_attr):
     """
-    Compute residual stream and sublayer contribution norms.
-
-    Strategy: derive attention contribution from residual differences
-    rather than hooking into self_attn.output directly. This is more
-    reliable across model families.
-
-    For a pre-LN transformer:
-        h_after_attn  = layer_output_after_attention_residual_add
+    Strategy: derive contributions from the residual stream directly.
+        h_in          = layer.input[0]
+        h_out         = layer.output[0]
+        mlp_contrib   = mlp.output
+        h_after_attn  = h_out - mlp_contrib
         attn_contrib  = h_after_attn - h_in
-        mlp_contrib   = layer_output - h_after_attn
-        layer_contrib = layer_output - h_in
-
-    nnsight exposes intermediate states via sub-module hooks.
-    We hook the MLP input (= h_after_attn) to get the split point.
+        layer_contrib = h_out - h_in
     """
-    layers   = _layers
     n_layers = _n_layers
 
-    with llm.session(remote=llm.remote) as session:
-        with torch.no_grad():
-            res_norms_all = 0
-            att_norms_all = 0
-            mlp_norms_all = 0
-            cnt = 0
+    res_norms_acc = torch.zeros(n_layers + 1)
+    att_norms_acc = torch.zeros(n_layers)
+    mlp_norms_acc = torch.zeros(n_layers)
+    cnt = 0
 
-            att_cos_all      = 0
-            mlp_cos_all      = 0
-            layer_cos_all    = 0
-            layer_io_cos_all = 0
+    att_cos_acc      = torch.zeros(n_layers)
+    mlp_cos_acc      = torch.zeros(n_layers)
+    layer_cos_acc    = torch.zeros(n_layers)
+    layer_io_cos_acc = torch.zeros(n_layers)
 
-            max_res_norms = torch.zeros(1)
-            max_att_norms = torch.zeros(1)
-            max_mlp_norms = torch.zeros(1)
+    max_res_norms = torch.zeros(n_layers + 1)
+    max_att_norms = torch.zeros(n_layers)
+    max_mlp_norms = torch.zeros(n_layers)
 
-            mean_relative_contribution_att   = 0
-            mean_relative_contribution_mlp   = 0
-            mean_relative_contribution_layer = 0
+    rel_att_acc   = torch.zeros(n_layers)
+    rel_mlp_acc   = torch.zeros(n_layers)
+    rel_layer_acc = torch.zeros(n_layers)
 
-            max_relative_contribution_att   = torch.zeros(1)
-            max_relative_contribution_mlp   = torch.zeros(1)
-            max_relative_contribution_layer = torch.zeros(1)
+    max_rel_att   = torch.zeros(n_layers)
+    max_rel_mlp   = torch.zeros(n_layers)
+    max_rel_layer = torch.zeros(n_layers)
 
-            for pi, prompt in enumerate(prompts):
-                print(f"[{pi+1}/{len(prompts)}]")
-                with llm.trace(prompt, remote=llm.remote):
-                    residual_log  = []   # h_0, h_1, ..., h_L  (layer outputs)
-                    mlp_input_log = []   # h_after_attn for each layer
-                    mlp_output_log = []  # mlp output for each layer
+    for pi, prompt in enumerate(prompts):
+        print(f"[{pi+1}/{len(prompts)}]")
 
-                    att_cos      = []
-                    mlp_cos      = []
-                    layer_cos    = []
-                    layer_io_cos = []
+        layer_in_t, layer_out_t, mlp_out_t = trace_one_prompt(llm, prompt, input_attr)
 
-                    relative_contribution_att   = []
-                    relative_contribution_mlp   = []
-                    relative_contribution_layer = []
+        # Process one layer at a time on CPU
+        per_layer_res_norms  = []  # [n_layers+1]
+        per_layer_att_norms  = []  # [n_layers]
+        per_layer_mlp_norms  = []  # [n_layers]
+        per_layer_att_cos    = []
+        per_layer_mlp_cos    = []
+        per_layer_layer_cos  = []
+        per_layer_io_cos     = []
+        per_layer_rel_att    = []
+        per_layer_rel_mlp    = []
+        per_layer_rel_layer  = []
 
-                    for li, layer in enumerate(layers):
-                        mlp = get_mlp_module(layer)
+        for li in range(n_layers):
+            r_in  = to_3d(layer_in_t[li].cpu().float())
+            r_out = to_3d(layer_out_t[li].cpu().float())
+            m_out = to_3d(mlp_out_t[li].cpu().float())
 
-                        # h coming into this layer
-                        r_in = get_layer_input(layer, input_attr).detach()
+            # Derived quantities
+            h_after_attn = r_out - m_out
+            a_out        = h_after_attn - r_in     # attn contribution
+            layer_diff   = r_out - r_in            # full layer contribution
 
-                        # h after the full layer (attn residual + mlp residual)
-                        r_out = layer.output[0].detach()
+            # Norms (per-token, then we collapse later)
+            r_in_norm  = r_in.norm(dim=-1).clamp(min=1e-6)
+            r_out_norm = r_out.norm(dim=-1).clamp(min=1e-6)
+            a_norm     = a_out.norm(dim=-1)
+            m_norm     = m_out.norm(dim=-1)
+            l_norm     = layer_diff.norm(dim=-1)
+            h_aa_norm  = h_after_attn.norm(dim=-1).clamp(min=1e-6)
 
-                        # h after attn residual add = mlp's input
-                        # In pre-LN: mlp takes the normed version, but the
-                        # residual add happens BEFORE norm, so mlp.input[0]
-                        # is the normed state. We want the un-normed residual,
-                        # which we can get as r_out - mlp.output
-                        m_out = mlp.output.detach()
+            if li == 0:
+                per_layer_res_norms.append(r_in_norm)
 
-                        # h_after_attn = r_out - mlp_contribution
-                        h_after_attn = (r_out - m_out).detach()
+            per_layer_res_norms.append(r_out_norm)
+            per_layer_att_norms.append(a_norm)
+            per_layer_mlp_norms.append(m_norm)
 
-                        # contributions
-                        a_out      = (h_after_attn - r_in).detach()   # attn contribution
-                        layer_diff = (r_out - r_in).detach()           # full layer contribution
+            per_layer_rel_att.append((a_norm / r_in_norm).squeeze(0))
+            per_layer_rel_mlp.append((m_norm / h_aa_norm).squeeze(0))
+            per_layer_rel_layer.append((l_norm / r_in_norm).squeeze(0))
 
-                        if li == 0:
-                            residual_log.clear()
-                            residual_log.append(r_in)
+            per_layer_att_cos.append(
+                F.cosine_similarity(a_out, r_in, dim=-1).squeeze(0)
+            )
+            per_layer_mlp_cos.append(
+                F.cosine_similarity(m_out, h_after_attn, dim=-1).squeeze(0)
+            )
+            per_layer_layer_cos.append(
+                F.cosine_similarity(layer_diff, r_in, dim=-1).squeeze(0)
+            )
+            per_layer_io_cos.append(
+                F.cosine_similarity(r_out, r_in, dim=-1).squeeze(0)
+            )
 
-                        residual_log.append(r_out)
-                        mlp_input_log.append(h_after_attn)
-                        mlp_output_log.append(m_out)
+        # Stack: [n_layers+1, batch=1, seq]  → [n_layers+1, seq]
+        res_norms_stack = torch.stack(per_layer_res_norms, dim=0).squeeze(1)
+        att_norms_stack = torch.stack(per_layer_att_norms, dim=0).squeeze(1)
+        mlp_norms_stack = torch.stack(per_layer_mlp_norms, dim=0).squeeze(1)
 
-                        relative_contribution_att.append(
-                            a_out.norm(dim=-1).cpu().float()
-                            / r_in.norm(dim=-1).clamp(min=1e-6).cpu().float()
-                        )
-                        relative_contribution_mlp.append(
-                            m_out.norm(dim=-1).cpu().float()
-                            / h_after_attn.norm(dim=-1).clamp(min=1e-6).cpu().float()
-                        )
-                        relative_contribution_layer.append(
-                            layer_diff.norm(dim=-1).cpu().float()
-                            / r_in.norm(dim=-1).clamp(min=1e-6).cpu().float()
-                        )
+        # Sum over sequence
+        seq_len = res_norms_stack.shape[1]
+        res_norms_acc += res_norms_stack.sum(dim=1)
+        att_norms_acc += att_norms_stack.sum(dim=1)
+        mlp_norms_acc += mlp_norms_stack.sum(dim=1)
+        cnt += seq_len
 
-                        att_cos.append(
-                            F.cosine_similarity(a_out, r_in, dim=-1).sum(1).cpu().float()
-                        )
-                        mlp_cos.append(
-                            F.cosine_similarity(m_out, h_after_attn, dim=-1).sum(1).cpu().float()
-                        )
-                        layer_cos.append(
-                            F.cosine_similarity(layer_diff, r_in, dim=-1).sum(1).cpu().float()
-                        )
-                        layer_io_cos.append(
-                            F.cosine_similarity(r_out, r_in, dim=-1).sum(1).cpu().float()
-                        )
+        # Max over sequence
+        max_res_norms = torch.maximum(max_res_norms, res_norms_stack.max(dim=1).values)
+        max_att_norms = torch.maximum(max_att_norms, att_norms_stack.max(dim=1).values)
+        max_mlp_norms = torch.maximum(max_mlp_norms, mlp_norms_stack.max(dim=1).values)
 
-                    r = torch.cat(residual_log,   dim=0).norm(dim=-1).cpu().float()
-                    a = torch.cat(mlp_input_log,  dim=0).norm(dim=-1).cpu().float()
-                    m = torch.cat(mlp_output_log, dim=0).norm(dim=-1).cpu().float()
+        # Relative contributions: stack [n_layers, seq]
+        rel_att_stack   = torch.stack(per_layer_rel_att,   dim=0)
+        rel_mlp_stack   = torch.stack(per_layer_rel_mlp,   dim=0)
+        rel_layer_stack = torch.stack(per_layer_rel_layer, dim=0)
 
-                    res_norms = r.sum(dim=1) + res_norms_all
-                    att_norms = a.sum(dim=1) + att_norms_all
-                    mlp_norms = m.sum(dim=1) + mlp_norms_all
-                    cnt += r.shape[1]
+        rel_att_acc   += rel_att_stack.sum(dim=1)
+        rel_mlp_acc   += rel_mlp_stack.sum(dim=1)
+        rel_layer_acc += rel_layer_stack.sum(dim=1)
 
-                    max_res_norms = torch.maximum(max_res_norms, r.max(dim=1).values)
-                    max_att_norms = torch.maximum(max_att_norms, a.max(dim=1).values)
-                    max_mlp_norms = torch.maximum(max_mlp_norms, m.max(dim=1).values)
+        max_rel_att   = torch.maximum(max_rel_att,   rel_att_stack.max(dim=1).values)
+        max_rel_mlp   = torch.maximum(max_rel_mlp,   rel_mlp_stack.max(dim=1).values)
+        max_rel_layer = torch.maximum(max_rel_layer, rel_layer_stack.max(dim=1).values)
 
-                    relative_contribution_att   = torch.cat(relative_contribution_att,   dim=0)
-                    relative_contribution_mlp   = torch.cat(relative_contribution_mlp,   dim=0)
-                    relative_contribution_layer = torch.cat(relative_contribution_layer, dim=0)
+        # Cosine similarities: stack [n_layers, seq]
+        att_cos_stack   = torch.stack(per_layer_att_cos,   dim=0)
+        mlp_cos_stack   = torch.stack(per_layer_mlp_cos,   dim=0)
+        layer_cos_stack = torch.stack(per_layer_layer_cos, dim=0)
+        io_cos_stack    = torch.stack(per_layer_io_cos,    dim=0)
 
-                    mean_relative_contribution_att   += relative_contribution_att.sum(dim=1)
-                    mean_relative_contribution_mlp   += relative_contribution_mlp.sum(dim=1)
-                    mean_relative_contribution_layer += relative_contribution_layer.sum(dim=1)
+        att_cos_acc      += att_cos_stack.sum(dim=1)
+        mlp_cos_acc      += mlp_cos_stack.sum(dim=1)
+        layer_cos_acc    += layer_cos_stack.sum(dim=1)
+        layer_io_cos_acc += io_cos_stack.sum(dim=1)
 
-                    max_relative_contribution_att = torch.maximum(
-                        max_relative_contribution_att,
-                        relative_contribution_att.max(dim=1).values
-                    )
-                    max_relative_contribution_mlp = torch.maximum(
-                        max_relative_contribution_mlp,
-                        relative_contribution_mlp.max(dim=1).values
-                    )
-                    max_relative_contribution_layer = torch.maximum(
-                        max_relative_contribution_layer,
-                        relative_contribution_layer.max(dim=1).values
-                    )
+    # Means over total tokens
+    res_norms = res_norms_acc / cnt
+    att_norms = att_norms_acc / cnt
+    mlp_norms = mlp_norms_acc / cnt
 
-                    att_cos_all      += torch.cat(att_cos,      dim=0)
-                    mlp_cos_all      += torch.cat(mlp_cos,      dim=0)
-                    layer_cos_all    += torch.cat(layer_cos,    dim=0)
-                    layer_io_cos_all += torch.cat(layer_io_cos, dim=0)
+    att_cos_all      = att_cos_acc      / cnt
+    mlp_cos_all      = mlp_cos_acc      / cnt
+    layer_cos_all    = layer_cos_acc    / cnt
+    layer_io_cos_all = layer_io_cos_acc / cnt
 
-            res_norms = (res_norms / cnt).save()
-            att_norms = (att_norms / cnt).save()
-            mlp_norms = (mlp_norms / cnt).save()
-
-            att_cos_all      = (att_cos_all      / cnt).save()
-            mlp_cos_all      = (mlp_cos_all      / cnt).save()
-            layer_cos_all    = (layer_cos_all    / cnt).save()
-            layer_io_cos_all = (layer_io_cos_all / cnt).save()
-
-            mean_relative_contribution_att   = (mean_relative_contribution_att   / cnt).save()
-            mean_relative_contribution_mlp   = (mean_relative_contribution_mlp   / cnt).save()
-            mean_relative_contribution_layer = (mean_relative_contribution_layer / cnt).save()
-
-            max_att_norms = max_att_norms.save()
-            max_mlp_norms = max_mlp_norms.save()
-            max_res_norms = max_res_norms.save()
-
-            max_relative_contribution_att   = max_relative_contribution_att.save()
-            max_relative_contribution_mlp   = max_relative_contribution_mlp.save()
+    mean_rel_att   = rel_att_acc   / cnt
+    mean_rel_mlp   = rel_mlp_acc   / cnt
+    mean_rel_layer = rel_layer_acc / cnt
 
     return (
-        att_norms.cpu(), mlp_norms.cpu(), res_norms.cpu(),
-        max_att_norms.cpu(), max_mlp_norms.cpu(), max_res_norms.cpu(),
-        mean_relative_contribution_att.cpu(),
-        mean_relative_contribution_mlp.cpu(),
-        mean_relative_contribution_layer.cpu(),
-        max_relative_contribution_att.cpu(),
-        max_relative_contribution_mlp.cpu(),
-        layer_cos_all.cpu(), att_cos_all.cpu(),
-        mlp_cos_all.cpu(), layer_io_cos_all.cpu()
+        att_norms, mlp_norms, res_norms,
+        max_att_norms, max_mlp_norms, max_res_norms,
+        mean_rel_att, mean_rel_mlp, mean_rel_layer,
+        max_rel_att, max_rel_mlp,
+        layer_cos_all, att_cos_all, mlp_cos_all, layer_io_cos_all
     )
 
 
@@ -304,22 +301,18 @@ def analyze_norms(llm, prompts, input_attr):
 prompts = list(LegalDataset())
 print(f"Loaded {len(prompts)} legal prompts.")
 
-# ── Probe to find correct nnsight input access pattern ────────────────
-# Delete old cache so we don't reuse a broken result
-import shutil
+# ── Clear any stale cache ────────────────────────────────────────────
 cache_dir = "cache/ndif_cache/analyze_norms"
 if os.path.exists(cache_dir):
     shutil.rmtree(cache_dir)
     print("Cleared old cache.")
 
+# ── Probe access pattern ─────────────────────────────────────────────
 input_attr = probe_layer_attrs(llm, _layers, prompts[0])
 if input_attr is None:
-    raise RuntimeError(
-        "Could not determine how to access layer inputs for this model. "
-        "Check the probe output above."
-    )
+    raise RuntimeError("Could not determine layer input access pattern.")
 
-# ── Run ───────────────────────────────────────────────────────────────
+# ── Run ──────────────────────────────────────────────────────────────
 (
     att_norms, mlp_norms, res_norms,
     max_att_norms, max_mlp_norms, max_res_norms,
