@@ -104,7 +104,12 @@ def run_logitlens(llm, prompts, K=5):
 
 
 # ── Load dataset ──────────────────────────────────────────────────────
-legal_dataset = LegalDataset()
+legal_dataset = LegalDataset(
+    json_path="samples.json",
+    max_samples=N_EXAMPLES,
+    include_steps=False,
+    use_chat_template=True,
+)
 N_EXAMPLES = len(legal_dataset)
 print(f"Loaded {N_EXAMPLES} legal prompts.")
 
