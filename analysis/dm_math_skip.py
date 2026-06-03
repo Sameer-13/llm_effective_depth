@@ -7,6 +7,9 @@ from lib.token_skip import measure_token_skip, plot_logit_effect
 import gc
 import sys
 
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
+
 
 dm_math_prompts = [
     ("arithmetic_1", ("Q: What is ((-14)/(-6))/(1162/(-4980))? A: ", "-10")),
@@ -39,7 +42,7 @@ def main():
 
     print("Testing instruct model.")
     llm = LanguageModel("meta-llama/Llama-3.2-3B-Instruct", device_map="auto", dispatch=True)
-    llm.eval()
+    set_eval(llm)
     llm.remote = False
     run_test(llm, "instruct")
     del llm
@@ -48,7 +51,7 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
     llm = LanguageModel("meta-llama/Llama-3.2-3B", device_map="auto", dispatch=True)
-    llm.eval()
+    set_eval(llm)
     llm.remote = False
     run_test(llm, "orig")
 

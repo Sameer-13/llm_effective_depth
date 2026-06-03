@@ -17,7 +17,9 @@ from lib.datasets import LegalDataset
 from tqdm import tqdm
 from lib.ndif_cache import ndif_cache_wrapper
 
-from lib.model_compat import get_layers, get_lm_head
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
+
 
 
 def plot_layer_diffs(dall):
@@ -191,7 +193,7 @@ def main():
         raise ValueError("Please provide a model name")
 
     llm = create_model(model_name, force_local=False)
-    llm.eval()
+    set_eval(llm)
 
     run(llm, model_name)
 

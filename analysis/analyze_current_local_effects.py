@@ -18,7 +18,7 @@ from lib.ndif_cache import ndif_cache_wrapper
 from analyze_future_effects import plot_layer_diffs, plot_logit_diffs, merge_io, get_future
 from analyze_future_local_effects import test_local_effect
 
-
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
 
 
 def run(llm, model_name):
@@ -54,7 +54,7 @@ def main():
         raise ValueError("Please provide a model name")
 
     llm = create_model(model_name, force_local=False)
-    llm.eval()
+    set_eval(llm)
 
     run(llm, model_name)
 

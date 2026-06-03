@@ -19,6 +19,8 @@ from lib.datasets import LegalDataset
 
 
 from analyze_future_effects import plot_layer_diffs, plot_logit_diffs, test_effect
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
 
 
 def test_current_max_effect(llm, prompt, N_CHUNKS=4, part = "layer"):
@@ -37,7 +39,7 @@ def main():
     llm = create_model(model_name)
     target_dir = "out/current_effects"
 
-    llm.eval()
+    set_eval(llm)
 
     os.makedirs(target_dir, exist_ok=True)
 

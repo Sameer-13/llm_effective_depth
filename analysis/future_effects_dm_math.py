@@ -6,6 +6,8 @@ from analyze_future_effects import test_effect, plot_layer_diffs, plot_logit_dif
 import random
 import sys
 
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
 
 if len(sys.argv) != 2:
     print(f"Usage: python {sys.argv[0]} <ckpt_path>")
@@ -74,7 +76,7 @@ def run_test(llm, prefix):
 
 print("Testing instruct model.")
 llm = LanguageModel("meta-llama/Llama-3.2-3B-Instruct", device_map="auto", dispatch=True)
-llm.eval()
+set_eval(llm)
 llm.remote = False
 run_test(llm, "instruct")
 del llm
@@ -83,7 +85,7 @@ print("Testing original model.")
 gc.collect()
 torch.cuda.empty_cache()
 llm = LanguageModel("meta-llama/Llama-3.2-3B", device_map="auto", dispatch=True)
-llm.eval()
+set_eval(llm)
 llm.remote = False
 
 print("Testing original model.")

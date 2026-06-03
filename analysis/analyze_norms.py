@@ -17,7 +17,7 @@ from lib.nnsight_tokenize import tokenize
 from lib.datasets import GSM8K
 from lib.ndif_cache import ndif_cache_wrapper
 
-from lib.model_compat import get_layers
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
 
 
 N_EXAMPLES = 20
@@ -33,7 +33,7 @@ else:
 llm = create_model(model_name)
 target_dir = "out/norms"
 
-llm.eval()
+set_eval(llm)
 
 os.makedirs(target_dir, exist_ok=True)
 

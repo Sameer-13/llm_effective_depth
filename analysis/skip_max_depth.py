@@ -16,6 +16,9 @@ from analyze_future_effects import test_effect, plot_layer_diffs
 from lib.nnsight_tokenize import tokenize
 import sys
 
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
+
 def plot_output_change(llm, hops, max_effects, format="{} hops"):
     plt.figure(figsize=(6,3))
     bars = []
@@ -80,7 +83,7 @@ def main():
     llm = create_model(model_name, force_local=False)
     target_dir = "out/skip_depth2"
 
-    llm.eval()
+    set_eval(llm)
 
     os.makedirs(target_dir, exist_ok=True)
 

@@ -16,6 +16,9 @@ from lib.model_compat import get_layers, get_norm, get_lm_head
 
 import sys
 
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
+
 if len(sys.argv) != 2:
     print(f"Usage: python {sys.argv[0]} model")
     exit(1)
@@ -33,7 +36,7 @@ target_dir = "out/logitlens"
 random.seed(123123)
 
 llm = create_model(model_name)
-llm.eval()
+set_eval(llm)
 
 os.makedirs(target_dir, exist_ok=True)
 

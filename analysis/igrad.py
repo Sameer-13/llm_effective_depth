@@ -7,6 +7,8 @@ from nnsight import LanguageModel
 from lib.models import create_model
 from lib.igrad import plot_igrads, get_igrads_multiple
 
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
 
 manual_prompts = [
     ("math", ("5 + 7 + 5 + 3 + 1 + 7 = ", "28")),
@@ -24,7 +26,7 @@ def main():
     llm = create_model(model_name)
     target_dir = "out/igrad"
 
-    llm.eval()
+    set_eval(llm)
 
     os.makedirs(target_dir, exist_ok=True)
 

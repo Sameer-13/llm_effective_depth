@@ -18,6 +18,9 @@ from lib.nnsight_tokenize import tokenize
 from lib.datasets import GSM8K
 from lib.token_skip import measure_token_skip, plot_logit_effect
 
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
+
 
 manual_prompts = [
     ("math", ("5 + 7 + 5 + 3 + 1 + 7 = ", "28")),
@@ -35,7 +38,7 @@ def main():
     llm = create_model(model_name)
     target_dir = "out/token_skip"
 
-    llm.eval()
+    set_eval(llm)
 
     os.makedirs(target_dir, exist_ok=True)
 

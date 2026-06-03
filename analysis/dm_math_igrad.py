@@ -8,6 +8,8 @@ import gc
 from dm_math_skip import dm_math_prompts
 import sys
 
+from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
 if len(sys.argv) != 2:
     print(f"Usage: python {sys.argv[0]} <ckpt_path>")
     exit(1)
@@ -30,7 +32,7 @@ def run_test(llm, prefix):
 
 print("Testing instruct model.")
 llm = LanguageModel("meta-llama/Llama-3.2-3B-Instruct", device_map="auto", dispatch=True)
-llm.eval()
+set_eval(llm)
 llm.remote = False
 run_test(llm, "instruct")
 del llm
@@ -39,7 +41,7 @@ print("Testing original model.")
 gc.collect()
 torch.cuda.empty_cache()
 llm = LanguageModel("meta-llama/Llama-3.2-3B", device_map="auto", dispatch=True)
-llm.eval()
+set_eval(llm)
 llm.remote = False
 run_test(llm, "orig")
 
