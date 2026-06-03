@@ -172,12 +172,7 @@ def run(llm, model_name):
     os.makedirs(target_dir, exist_ok=True)
 
     # Load legal dataset
-    legal_dataset = LegalDataset(
-        json_path="samples.json",
-        max_samples=N_EXAMPLES,
-        include_steps=False,
-        use_chat_template=True,
-    )
+    legal_dataset = LegalDataset()
     print(f"Loaded {len(legal_dataset)} legal prompts.")
 
     for what in ["layer", "mlp", "attention"]:

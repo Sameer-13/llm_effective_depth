@@ -263,12 +263,7 @@ def analyze_norms(llm, prompts):
 
 
 # ── Load prompts ──────────────────────────────────────────────────────
-prompts = list(LegalDataset(
-    json_path="samples.json",
-    max_samples=N_EXAMPLES,
-    include_steps=False,
-    use_chat_template=True,
-))
+prompts = list(LegalDataset())
 print(f"Loaded {len(prompts)} legal prompts.")
 
 # ── Probe to confirm attribute names before expensive run ─────────────
