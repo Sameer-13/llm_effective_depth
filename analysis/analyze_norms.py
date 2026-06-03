@@ -171,11 +171,7 @@ def analyze_norms(llm, prompts):
 
 
 prompts = []
-for i, prompt in enumerate(LegalDataset(
-    json_path="/path/to/your/samples.json",
-    include_steps=False,
-    use_chat_template=True,
-)):
+for i, prompt in enumerate(LegalDataset()):
     prompts.append(prompt)
 
 
