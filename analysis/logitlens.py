@@ -8,6 +8,7 @@ import random
 
 from lib.models import create_model
 from lib.datasets import GSM8K
+from lib.datasets import LegalDataset
 from lib.ndif_cache import ndif_cache_wrapper
 import torch.nn.functional as F
 
@@ -86,7 +87,7 @@ N_EXAMPLES = 20
 accu_kl_div = 0
 accu_topk_overlaps = 0
 
-for i, prompt in enumerate(GSM8K()):
+for i, prompt in enumerate(LegalDataset()):
     if i >= N_EXAMPLES:
         break
     kl_divs, topk_overlaps = run_logitlens(llm, [prompt])

@@ -15,6 +15,7 @@ from nnsight import LanguageModel
 from lib.models import create_model
 from lib.nnsight_tokenize import tokenize
 from lib.datasets import GSM8K
+from lib.datasets import LegalDataset
 
 
 from analyze_future_effects import plot_layer_diffs, plot_logit_diffs, test_effect
@@ -44,7 +45,7 @@ def main():
         dall = []
         d_max = None
         dout_max = torch.zeros([1])
-        for idx, prompt in enumerate(GSM8K()):
+        for idx, prompt in enumerate(LegalDataset()):
             print(prompt)
             diff_now, diff_out = test_current_max_effect(llm, prompt, part=what)
             d_max = torch.max(d_max, diff_now) if d_max is not None else diff_now

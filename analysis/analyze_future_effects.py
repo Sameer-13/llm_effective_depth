@@ -13,6 +13,7 @@ from typing import Optional
 from lib.models import get_model, create_model
 from lib.nnsight_tokenize import tokenize
 from lib.datasets import GSM8K
+from lib.datasets import LegalDataset
 from tqdm import tqdm
 from lib.ndif_cache import ndif_cache_wrapper
 
@@ -141,7 +142,7 @@ def run(llm, model_name):
         dall = []
         d_max = torch.zeros([1])
         dout_max = torch.zeros([1])
-        for idx, prompt in enumerate(GSM8K()):
+        for idx, prompt in enumerate(LegalDataset()):
             print(prompt)
             diff_now, diff_out = test_future_max_effect(llm, prompt, part=what)
             d_max = torch.max(d_max, diff_now)
