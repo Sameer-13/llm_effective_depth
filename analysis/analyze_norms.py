@@ -1,5 +1,12 @@
+import matplotlib
+matplotlib.use("Agg")              # no display backend
+matplotlib.rcParams['text.usetex'] = False   # don't require latex binary
+
 from lib.matplotlib_config import sort_zorder
 import matplotlib.pyplot as plt
+
+# Force usetex off again in case matplotlib_config turned it on
+plt.rcParams['text.usetex'] = False
 
 import os
 import sys
