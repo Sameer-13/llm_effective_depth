@@ -5,8 +5,10 @@ matplotlib.rcParams['text.usetex'] = False   # don't require latex binary
 from lib.matplotlib_config import sort_zorder
 import matplotlib.pyplot as plt
 
-# Force usetex off again in case matplotlib_config turned it on
+# Force usetex off and use default fonts (override anything matplotlib_config set)
 plt.rcParams['text.usetex'] = False
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['mathtext.fontset'] = 'dejavusans'
 
 import os
 import sys
@@ -285,11 +287,11 @@ def set_xlim(l):
 plt.figure(figsize=(W, H))
 bars = []
 bars.append(plt.bar(x_range, att_norms.float().cpu().numpy(),
-                    label="Attention: $||\\bm{a}_l||_2$", width=W_BAR))
+                    label=r"Attention: $\|a_l\|_2$", width=W_BAR))
 bars.append(plt.bar(x_range, mlp_norms.float().cpu().numpy(),
-                    label="MLP: $||\\bm{m}_l||_2$", width=W_BAR))
+                    label=r"MLP: $\|m_l\|_2$", width=W_BAR))
 bars.append(plt.bar(x_range, res_norms[:-1].float().cpu().numpy(),
-                    label="Residual: $||\\bm{h}_{l}||_2$", width=W_BAR))
+                    label=r"Residual: $\|h_l\|_2$", width=W_BAR))
 plt.xlabel("Layer index ($l$)")
 plt.ylabel("Mean Norm")
 plt.legend()
@@ -301,11 +303,11 @@ plt.close()
 plt.figure(figsize=(W, H))
 bars = []
 bars.append(plt.bar(x_range, max_att_norms.float().cpu().numpy(),
-                    label="Attention $\\bm{a}_l$", width=W_BAR))
+                    label=r"Attention $a_l$", width=W_BAR))
 bars.append(plt.bar(x_range, max_mlp_norms.float().cpu().numpy(),
-                    label="MLP $\\bm{m}_l$", width=W_BAR))
+                    label=r"MLP $m_l$", width=W_BAR))
 bars.append(plt.bar(x_range, max_res_norms[:-1].float().cpu().numpy(),
-                    label="Residual $\\bm{h}_{l}$", width=W_BAR))
+                    label=r"Residual $h_l$", width=W_BAR))
 plt.xlabel("Layer index ($l$)")
 plt.ylabel("Max Norm")
 plt.legend()
@@ -317,11 +319,11 @@ plt.close()
 plt.figure(figsize=(W, H))
 bars = []
 bars.append(plt.bar(x_range, mean_relative_contribution_att.float().cpu().numpy(),
-                    label="Attention: $||\\bm{a}_l||_2/||\\bm{h}_l||_2$", width=W_BAR))
+                    label=r"Attention: $\|a_l\|_2/\|h_l\|_2$", width=W_BAR))
 bars.append(plt.bar(x_range, mean_relative_contribution_mlp.float().cpu().numpy(),
-                    label="MLP: $||\\bm{m}_l||_2/||\\bm{h}_l + \\bm{a}_l||_2$", width=W_BAR))
+                    label=r"MLP: $\|m_l\|_2/\|h_l + a_l\|_2$", width=W_BAR))
 bars.append(plt.bar(x_range, mean_relative_contribution_layer.float().cpu().numpy(),
-                    label="Attention + MLP: $||\\bm{a}_l + \\bm{m}_l||_2/||\\bm{h}_{l}||_2$",
+                    label=r"Attention + MLP: $\|a_l + m_l\|_2/\|h_l\|_2$",
                     width=W_BAR))
 plt.legend()
 sort_zorder(bars)
@@ -341,9 +343,9 @@ plt.close()
 plt.figure(figsize=(W, H))
 bars = []
 bars.append(plt.bar(x_range, max_relative_contribution_att.float().cpu().numpy(),
-                    label="Attention $\\bm{a}_l$", width=W_BAR))
+                    label=r"Attention $a_l$", width=W_BAR))
 bars.append(plt.bar(x_range, max_relative_contribution_mlp.float().cpu().numpy(),
-                    label="MLP $\\bm{m}_l$", width=W_BAR))
+                    label=r"MLP $m_l$", width=W_BAR))
 plt.ylim(0, 2)
 plt.xlabel("Layer index ($l$)")
 plt.ylabel("Max Relative Contribution")
@@ -357,11 +359,11 @@ plt.close()
 plt.figure(figsize=(W, H))
 bars = []
 bars.append(plt.bar(x_range, att_cos_all.float().cpu().numpy(),
-                    label="Attention: $\\text{cossim}(\\bm{a}_l, \\bm{h}_l)$", width=W_BAR))
+                    label=r"Attention: $\mathrm{cossim}(a_l, h_l)$", width=W_BAR))
 bars.append(plt.bar(x_range, mlp_cos_all.float().cpu().numpy(),
-                    label="MLP: $\\text{cossim}(\\bm{m}_l, \\bm{h}_l + \\bm{a}_l)$", width=W_BAR))
+                    label=r"MLP: $\mathrm{cossim}(m_l, h_l + a_l)$", width=W_BAR))
 bars.append(plt.bar(x_range, layer_cos_all.float().cpu().numpy(),
-                    label="Attention + MLP: $\\text{cossim}(\\bm{a}_l + \\bm{m}_l, \\bm{h}_l)$",
+                    label=r"Attention + MLP: $\mathrm{cossim}(a_l + m_l, h_l)$",
                     width=W_BAR))
 plt.xlabel("Layer index ($l$)")
 plt.ylabel("Cosine similarity")
@@ -373,7 +375,7 @@ plt.close()
 
 plt.figure(figsize=(W, H))
 plt.bar(x_range, layer_io_cos_all.float().cpu().numpy(),
-        label="Attention + MLP $\\bm{a}_l + \\bm{m}_l$")
+        label=r"Attention + MLP $a_l + m_l$")
 plt.xlabel("Layer index ($l$)")
 plt.ylabel("Cosine similarity")
 set_xlim(_n_layers)
