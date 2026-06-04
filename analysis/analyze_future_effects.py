@@ -87,9 +87,15 @@ def merge_io(intervened, orig, t=None, no_skip_front=1):
     return torch.cat(parts, dim=sd)
 
 
-def apply_intervention(layer, t, part, no_skip_front, input_attr):
+def apply_intervention(layer, t, part, no_skip_front, input_attr, precomputed_mlp=None):
     """Modify layer output to simulate skipping a sublayer.
-    Must be called at the natural execution point of this layer."""
+    Must be called at the natural execution point of this layer.
+
+    For part='attention', `precomputed_mlp` must be a real tensor (the
+    mlp output captured from a previous trace), because reading both
+    layer.output and layer.mlp.output in the same trace triggers nnsight
+    0.7's hook-collision bug.
+    """
     if input_attr == "input":
         layer_in = layer.input[0]
     else:
@@ -116,22 +122,19 @@ def apply_intervention(layer, t, part, no_skip_front, input_attr):
             layer.mlp.output[:] = new_m
 
     elif part == "attention":
+        assert precomputed_mlp is not None, \
+            "attention intervention needs precomputed_mlp tensor"
         raw_output = layer.output
-        mlp_out = layer.mlp.output
-        if isinstance(mlp_out, tuple):
-            mlp_out = mlp_out[0]
-
         if isinstance(raw_output, tuple):
             hidden = raw_output[0]
-            # Align layer_in and mlp_out to match hidden's shape
-            li_aligned  = _align_dims(layer_in, hidden)
-            mlp_aligned = _align_dims(mlp_out,  hidden)
+            li_aligned  = _align_dims(layer_in,        hidden)
+            mlp_aligned = _align_dims(precomputed_mlp, hidden)
             no_attn = li_aligned + mlp_aligned
             new_hidden = merge_io(no_attn, hidden, t, no_skip_front)
             layer.output[0][:] = new_hidden
         else:
-            li_aligned  = _align_dims(layer_in, raw_output)
-            mlp_aligned = _align_dims(mlp_out,  raw_output)
+            li_aligned  = _align_dims(layer_in,        raw_output)
+            mlp_aligned = _align_dims(precomputed_mlp, raw_output)
             no_attn = li_aligned + mlp_aligned
             new_hidden = merge_io(no_attn, raw_output, t, no_skip_front)
             layer.output[:] = new_hidden
@@ -191,13 +194,44 @@ def trace_baseline(llm, prompt, input_attr):
     return residual_diffs, outputs
 
 
-def trace_intervened(llm, prompt, lskip, t, part, no_skip_front, input_attr):
-    """Intervention pass. CRITICAL: apply intervention AT THE NATURAL
-    EXECUTION POINT of layer `lskip`, in-order, NOT before or after.
-    nnsight 0.7 enforces execution-order access."""
+def trace_capture_mlp_outputs(llm, prompt):
+    """Capture mlp.output for every layer in one trace.
+    Used as a precomputation step for the 'attention' intervention,
+    since we can't read layer.output and mlp.output in the same trace
+    (nnsight 0.7 hook collision bug)."""
+    layers = _layers
+
+    saved_mlp = []
+    with torch.no_grad():
+        with llm.trace(prompt, remote=llm.remote):
+            for layer in layers:
+                saved_mlp.append(layer.mlp.output.save())
+
+    out = []
+    for s in saved_mlp:
+        v = _realize(s).detach()
+        if isinstance(v, tuple):
+            v = v[0]
+        out.append(v)
+    return out
+
+
+def trace_intervened(llm, prompt, lskip, t, part, no_skip_front, input_attr,
+                     precomputed_mlp_per_layer=None):
+    """Intervention pass. Apply intervention AT THE NATURAL EXECUTION POINT
+    of layer `lskip`, in-order (nnsight 0.7 requires this).
+
+    For part='attention', `precomputed_mlp_per_layer` must be a list of
+    pre-captured mlp outputs (one per layer); we'll use the one for layer
+    `lskip` to avoid the hook-collision bug."""
     layers   = _layers
     norm     = _norm
     n_layers = _n_layers
+
+    precomputed_mlp = None
+    if part == "attention":
+        assert precomputed_mlp_per_layer is not None
+        precomputed_mlp = precomputed_mlp_per_layer[lskip]
 
     saved_inputs = []
     saved_logits = None
@@ -205,15 +239,13 @@ def trace_intervened(llm, prompt, lskip, t, part, no_skip_front, input_attr):
     with torch.no_grad():
         with llm.trace(prompt, remote=llm.remote):
             for li, layer in enumerate(layers):
-                # 1. Save input first
                 if input_attr == "input":
                     saved_inputs.append(layer.input[0].save())
                 else:
                     saved_inputs.append(layer.inputs[0][0].save())
-                # 2. If this is the target layer, intervene NOW
                 if li == lskip:
-                    apply_intervention(layer, t, part, no_skip_front, input_attr)
-            # Final post-layer residual (= input to final norm)
+                    apply_intervention(layer, t, part, no_skip_front,
+                                       input_attr, precomputed_mlp=precomputed_mlp)
             saved_inputs.append(norm.input[0].save())
             saved_logits = llm.output.logits.save()
 
@@ -228,6 +260,13 @@ def test_effect(llm, prompt, positions, part, no_skip_front=1):
 
     residual_log, outputs = trace_baseline(llm, prompt, _input_attr)
 
+    # For the attention intervention, we need mlp.output values but can't
+    # read them in the same trace as layer.output. Capture them once here.
+    precomputed_mlp = None
+    if part == "attention":
+        print("  (capturing mlp outputs in a separate trace for attention experiment)")
+        precomputed_mlp = trace_capture_mlp_outputs(llm, prompt)
+
     all_diffs     = []
     all_out_diffs = []
 
@@ -237,7 +276,8 @@ def test_effect(llm, prompt, positions, part, no_skip_front=1):
 
         for lskip in range(n_layers):
             new_logs, new_outputs = trace_intervened(
-                llm, prompt, lskip, t, part, no_skip_front, _input_attr
+                llm, prompt, lskip, t, part, no_skip_front, _input_attr,
+                precomputed_mlp_per_layer=precomputed_mlp
             )
 
             relative_diffs = (
