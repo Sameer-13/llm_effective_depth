@@ -73,29 +73,43 @@ def apply_intervention(layer, t, part, no_skip_front, input_attr):
         raw_output = layer.output
         if isinstance(raw_output, tuple):
             hidden = raw_output[0]
-            rest   = raw_output[1:]
             new_hidden = merge_io(layer_in, hidden, t, no_skip_front)
-            layer.output = (new_hidden,) + rest
+            # Modify in place — don't reassign as tuple. The next layer
+            # receives whatever the framework passes; we just edit the
+            # hidden state slot inside the tuple.
+            layer.output[0][:] = new_hidden
         else:
-            layer.output = merge_io(layer_in, layer.output[0], t, no_skip_front),
+            new_hidden = merge_io(layer_in, raw_output, t, no_skip_front)
+            layer.output[:] = new_hidden
 
     elif part == "mlp":
-        layer.mlp.output = merge_io(
-            torch.zeros_like(layer.mlp.output),
-            layer.mlp.output, t, no_skip_front
-        )
+        mlp_out = layer.mlp.output
+        if isinstance(mlp_out, tuple):
+            m = mlp_out[0]
+            new_m = merge_io(torch.zeros_like(m), m, t, no_skip_front)
+            layer.mlp.output[0][:] = new_m
+        else:
+            new_m = merge_io(torch.zeros_like(mlp_out), mlp_out, t, no_skip_front)
+            layer.mlp.output[:] = new_m
 
     elif part == "attention":
         raw_output = layer.output
         if isinstance(raw_output, tuple):
             hidden = raw_output[0]
-            rest   = raw_output[1:]
-            no_attn = layer_in + layer.mlp.output
+            # "zero attention" means: layer output = input + mlp output (no attn contrib)
+            mlp_out = layer.mlp.output
+            if isinstance(mlp_out, tuple):
+                mlp_out = mlp_out[0]
+            no_attn = layer_in + mlp_out
             new_hidden = merge_io(no_attn, hidden, t, no_skip_front)
-            layer.output = (new_hidden,) + rest
+            layer.output[0][:] = new_hidden
         else:
-            no_attn = layer_in + layer.mlp.output
-            layer.output = merge_io(no_attn, layer.output[0], t, no_skip_front),
+            mlp_out = layer.mlp.output
+            if isinstance(mlp_out, tuple):
+                mlp_out = mlp_out[0]
+            no_attn = layer_in + mlp_out
+            new_hidden = merge_io(no_attn, raw_output, t, no_skip_front)
+            layer.output[:] = new_hidden
 
     else:
         raise ValueError(f"Invalid part: {part}")
