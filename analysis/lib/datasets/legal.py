@@ -65,7 +65,7 @@ class LegalDataset:
 
     def __init__(
         self,
-        json_path: str = "/Users/sameeralsabea/py_dev/LegalArabic/grpo/data/dataset_steps_verdict_classification.json",
+        json_path: str = "/home/sabeasm/LegalArabic/grpo/data/dataset_steps_verdict_classification.json",
         max_samples: Optional[int] = 10,
         facts_key: str = "facts",
         laws_key: str = "laws",
