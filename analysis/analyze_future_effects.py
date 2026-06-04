@@ -51,14 +51,40 @@ def plot_logit_diffs(dall):
 
 # ── Intervention helpers ──────────────────────────────────────────────
 
-def merge_io(intervened, orig, t: Optional[int] = None, no_skip_front: int = 1):
-    outs = [orig[:, :no_skip_front]]
+def _seq_dim(t):
+    """seq is the second-to-last dim. Works for 2D [seq, hidden] and 3D [batch, seq, hidden]."""
+    return t.dim() - 2
+
+
+def _align_dims(a, b):
+    """Make a and b have the same number of dims (matching b's dim count)."""
+    while a.dim() < b.dim():
+        a = a.unsqueeze(0)
+    while a.dim() > b.dim():
+        a = a.squeeze(0)
+    return a
+
+
+def merge_io(intervened, orig, t=None, no_skip_front=1):
+    """
+    Slice along the seq dim and concatenate. Works for 2D or 3D tensors.
+    `intervened` is auto-aligned to match `orig`'s dim count.
+    """
+    intervened = _align_dims(intervened, orig)
+    sd = _seq_dim(orig)
+
+    def sl(start, stop):
+        s = [slice(None)] * orig.dim()
+        s[sd] = slice(start, stop)
+        return tuple(s)
+
+    parts = [orig[sl(None, no_skip_front)]]
     if t is not None:
-        outs.append(intervened[:, no_skip_front:t].to(orig.device))
-        outs.append(orig[:, t:])
+        parts.append(intervened[sl(no_skip_front, t)].to(orig.device))
+        parts.append(orig[sl(t, None)])
     else:
-        outs.append(intervened[:, no_skip_front:].to(orig.device))
-    return torch.cat(outs, dim=1)
+        parts.append(intervened[sl(no_skip_front, None)].to(orig.device))
+    return torch.cat(parts, dim=sd)
 
 
 def apply_intervention(layer, t, part, no_skip_front, input_attr):
@@ -74,9 +100,6 @@ def apply_intervention(layer, t, part, no_skip_front, input_attr):
         if isinstance(raw_output, tuple):
             hidden = raw_output[0]
             new_hidden = merge_io(layer_in, hidden, t, no_skip_front)
-            # Modify in place — don't reassign as tuple. The next layer
-            # receives whatever the framework passes; we just edit the
-            # hidden state slot inside the tuple.
             layer.output[0][:] = new_hidden
         else:
             new_hidden = merge_io(layer_in, raw_output, t, no_skip_front)
@@ -94,20 +117,22 @@ def apply_intervention(layer, t, part, no_skip_front, input_attr):
 
     elif part == "attention":
         raw_output = layer.output
+        mlp_out = layer.mlp.output
+        if isinstance(mlp_out, tuple):
+            mlp_out = mlp_out[0]
+
         if isinstance(raw_output, tuple):
             hidden = raw_output[0]
-            # "zero attention" means: layer output = input + mlp output (no attn contrib)
-            mlp_out = layer.mlp.output
-            if isinstance(mlp_out, tuple):
-                mlp_out = mlp_out[0]
-            no_attn = layer_in + mlp_out
+            # Align layer_in and mlp_out to match hidden's shape
+            li_aligned  = _align_dims(layer_in, hidden)
+            mlp_aligned = _align_dims(mlp_out,  hidden)
+            no_attn = li_aligned + mlp_aligned
             new_hidden = merge_io(no_attn, hidden, t, no_skip_front)
             layer.output[0][:] = new_hidden
         else:
-            mlp_out = layer.mlp.output
-            if isinstance(mlp_out, tuple):
-                mlp_out = mlp_out[0]
-            no_attn = layer_in + mlp_out
+            li_aligned  = _align_dims(layer_in, raw_output)
+            mlp_aligned = _align_dims(mlp_out,  raw_output)
+            no_attn = li_aligned + mlp_aligned
             new_hidden = merge_io(no_attn, raw_output, t, no_skip_front)
             layer.output[:] = new_hidden
 
