@@ -39,42 +39,42 @@ os.makedirs(target_dir, exist_ok=True)
 _layers   = get_layers(llm)
 _norm     = get_norm(llm)
 _lm_head  = get_lm_head(llm)
-_embed    = get_embed_tokens(llm)
 _n_layers = len(_layers)
 # ─────────────────────────────────────────────────────────────────────
 
 
 def trace_logitlens(llm, prompt):
     """
-    Capture, for each layer:
-      - layer.input[0]   = residual stream entering this layer
-    And once at the end:
-      - the final logits from llm.output.logits
+    Inside the trace, project EACH layer's residual stream through the
+    model's own final-norm and lm_head — using nnsight's wrapped modules
+    (NOT raw _module objects, which are on meta device with dispatch=False).
 
-    Then OUTSIDE the trace, apply the model's final norm + lm_head to
-    every residual stream snapshot. This avoids the nnsight 0.7 hook
-    collision issues and keeps everything simple.
+    Save the resulting logits per layer + the actual final logits.
     """
     layers = _layers
+    norm   = _norm        # nnsight Envoy
+    head   = _lm_head     # nnsight Envoy
     n_layers = _n_layers
 
-    saved_residuals = []   # list of layer inputs (= residual stream at each depth)
-    saved_logits    = None
+    saved_layer_logits = []   # per-layer logitlens projections
+    saved_final_logits = None
 
     with torch.no_grad():
         with llm.trace(prompt, remote=llm.remote):
             for layer in layers:
-                saved_residuals.append(layer.input[0].save())
-            # final residual = output of last layer = input to final norm
-            saved_residuals.append(_norm.input[0].save())
-            saved_logits = llm.output.logits.save()
+                tap = layer.input[0]
+                # Apply norm + lm_head INSIDE the trace.
+                # nnsight will invoke the real modules with proper weights.
+                projected = head(norm(tap))
+                saved_layer_logits.append(projected.save())
+            saved_final_logits = llm.output.logits.save()
 
     def realize(x):
         return x.value if hasattr(x, 'value') else x
 
-    residuals = [realize(t).detach() for t in saved_residuals]
-    logits    = realize(saved_logits).detach()
-    return residuals, logits
+    layer_logits = [realize(t).detach() for t in saved_layer_logits]
+    final_logits = realize(saved_final_logits).detach()
+    return layer_logits, final_logits
 
 
 def to_3d(t):
@@ -85,71 +85,40 @@ def to_3d(t):
 
 @ndif_cache_wrapper
 def run_logitlens(llm, prompts, K=5):
-    """
-    Logitlens: project the residual stream at each layer through
-    final_norm and lm_head to get per-layer "predictions". Compute:
-      - KL divergence from each layer's prediction to the final output
-      - Top-K token overlap between each layer's prediction and the final
-
-    We avoid all nnsight pitfalls by:
-      1. Only saving raw residuals + final logits inside the trace
-      2. Doing the norm + lm_head projection OUTSIDE the trace in pure PyTorch
-    """
     n_layers = _n_layers
 
-    # Pre-resolve the actual PyTorch modules for use outside the trace
-    norm_module    = _norm._module       # the nn.Module wrapped by nnsight
-    lm_head_module = _lm_head._module
-
-    all_kl_per_layer  = []   # list of [n_layers] tensors, one per prompt
-    all_overlap_per_layer = []   # same shape
+    all_kl_per_layer      = []
+    all_overlap_per_layer = []
 
     for pi, prompt in enumerate(prompts):
         print(f"[{pi+1}/{len(prompts)}]")
-        residuals, logits = trace_logitlens(llm, prompt)
+        layer_logits, final_logits = trace_logitlens(llm, prompt)
 
-        # logits shape: [batch=1, seq, vocab]
-        out_log_probs = logits.float().log_softmax(-1).cpu()   # CPU float32
-        out_topk      = out_log_probs.topk(K, dim=-1).indices  # [1, seq, K]
+        # Move everything to CPU float32 for KL math
+        final_lp = to_3d(final_logits.float().cpu()).log_softmax(-1)   # [1, seq, V]
+        out_topk = final_lp.topk(K, dim=-1).indices                    # [1, seq, K]
+        vocab_size = final_lp.shape[-1]
 
         kl_per_layer      = []
         overlap_per_layer = []
 
-        # Move norm and lm_head to CPU temporarily — or apply on GPU
-        # We'll apply on the device the residual is currently on.
         for li in range(n_layers):
-            r = to_3d(residuals[li])
+            layer_lp = to_3d(layer_logits[li].float().cpu()).log_softmax(-1)
 
-            # Apply final norm + lm_head to this layer's residual
-            with torch.no_grad():
-                # Match the dtype the modules expect
-                r_for_norm = r.to(dtype=next(norm_module.parameters()).dtype,
-                                   device=next(norm_module.parameters()).device)
-                layer_logits = lm_head_module(norm_module(r_for_norm))
-
-            layer_log_probs = layer_logits.float().log_softmax(-1).cpu()
-
-            # KL(layer || final) — measures how different this layer's
-            # prediction is from the final prediction.
-            # Actually the original code computes KL(layer || final) as
-            #   sum(p_layer * (log p_layer - log p_final))
-            kl = (layer_log_probs.exp() * (layer_log_probs - out_log_probs)).sum(-1).mean()
+            # KL(layer || final) per token, averaged over sequence
+            kl = (layer_lp.exp() * (layer_lp - final_lp)).sum(-1).mean()
             kl_per_layer.append(kl)
 
             # Top-K overlap
-            layer_topk = layer_log_probs.topk(K, dim=-1).indices  # [1, seq, K]
-            # For each position, count how many of the top-K agree
-            # Use one-hot intersection trick
-            vocab_size = layer_log_probs.shape[-1]
-            real_oh   = F.one_hot(out_topk,   vocab_size).sum(-2)  # [1, seq, V]
-            layer_oh  = F.one_hot(layer_topk, vocab_size).sum(-2)  # [1, seq, V]
-            overlap = (real_oh.float() * layer_oh.float()).sum(-1) / K  # [1, seq]
+            layer_topk = layer_lp.topk(K, dim=-1).indices
+            real_oh  = F.one_hot(out_topk,   vocab_size).sum(-2).float()
+            layer_oh = F.one_hot(layer_topk, vocab_size).sum(-2).float()
+            overlap  = (real_oh * layer_oh).sum(-1) / K
             overlap_per_layer.append(overlap.mean())
 
         all_kl_per_layer.append(torch.stack(kl_per_layer, dim=0))
         all_overlap_per_layer.append(torch.stack(overlap_per_layer, dim=0))
 
-    # Average over all prompts
     avg_kl      = torch.stack(all_kl_per_layer,      dim=0).mean(dim=0)
     avg_overlap = torch.stack(all_overlap_per_layer, dim=0).mean(dim=0)
 
