@@ -49,7 +49,7 @@ def plot_logit_diffs(dall):
     return fig
 
 
-# ── Intervention helper ───────────────────────────────────────────────
+# ── Intervention helpers ──────────────────────────────────────────────
 
 def merge_io(intervened, orig, t: Optional[int] = None, no_skip_front: int = 1):
     outs = [orig[:, :no_skip_front]]
@@ -61,11 +61,9 @@ def merge_io(intervened, orig, t: Optional[int] = None, no_skip_front: int = 1):
     return torch.cat(outs, dim=1)
 
 
-def apply_intervention(layer, t: Optional[int], part: str, no_skip_front: int, input_attr="input"):
-    """
-    Modify a layer's output to simulate skipping a sublayer.
-    Called AFTER all .save() calls have been registered.
-    """
+def apply_intervention(layer, t, part, no_skip_front, input_attr):
+    """Modify layer output to simulate skipping a sublayer.
+    Must be called at the natural execution point of this layer."""
     if input_attr == "input":
         layer_in = layer.input[0]
     else:
@@ -88,7 +86,6 @@ def apply_intervention(layer, t: Optional[int], part: str, no_skip_front: int, i
         )
 
     elif part == "attention":
-        # Zero attn: set layer output = layer_input + mlp.output
         raw_output = layer.output
         if isinstance(raw_output, tuple):
             hidden = raw_output[0]
@@ -104,7 +101,7 @@ def apply_intervention(layer, t: Optional[int], part: str, no_skip_front: int, i
         raise ValueError(f"Invalid part: {part}")
 
 
-def get_future(data, t: Optional[int]):
+def get_future(data, t):
     if t is not None:
         return data[:, t:]
     return data
@@ -117,7 +114,6 @@ def _realize(x):
 
 
 def _residuals_to_diffs(saved_inputs, n_layers):
-    """Convert list of saved layer inputs into per-layer residual diffs."""
     inputs = [_realize(t).detach() for t in saved_inputs]
     residual_diffs = []
     for li in range(n_layers):
@@ -128,13 +124,13 @@ def _residuals_to_diffs(saved_inputs, n_layers):
         if h_out.dim() == 2:
             h_out = h_out.unsqueeze(0)
         residual_diffs.append((h_out - h_in).float().cpu())
-    return torch.cat(residual_diffs, dim=0)   # [n_layers, batch, seq, hidden]
+    return torch.cat(residual_diffs, dim=0)
 
 
 def trace_baseline(llm, prompt, input_attr):
-    """Baseline: no intervention. Just save residuals + logits."""
-    layers = _layers
-    norm   = _norm
+    """Baseline forward pass. Save layer inputs (in execution order) + logits."""
+    layers   = _layers
+    norm     = _norm
     n_layers = _n_layers
 
     saved_inputs = []
@@ -142,7 +138,7 @@ def trace_baseline(llm, prompt, input_attr):
 
     with torch.no_grad():
         with llm.trace(prompt, remote=llm.remote):
-            # Register ALL saves FIRST, in order
+            # Access layers IN EXECUTION ORDER — save each as we go
             for layer in layers:
                 if input_attr == "input":
                     saved_inputs.append(layer.input[0].save())
@@ -152,18 +148,16 @@ def trace_baseline(llm, prompt, input_attr):
             saved_logits = llm.output.logits.save()
 
     residual_diffs = _residuals_to_diffs(saved_inputs, n_layers)
-    outputs        = _realize(saved_logits).detach().float().softmax(dim=-1).cpu()
+    outputs = _realize(saved_logits).detach().float().softmax(dim=-1).cpu()
     return residual_diffs, outputs
 
 
 def trace_intervened(llm, prompt, lskip, t, part, no_skip_front, input_attr):
-    """
-    Intervention pass. CRITICAL: register .save() calls FIRST, then
-    apply the intervention. This guarantees nnsight's hook ordering
-    matches the forward-pass ordering and we don't miss layer 0's input.
-    """
-    layers = _layers
-    norm   = _norm
+    """Intervention pass. CRITICAL: apply intervention AT THE NATURAL
+    EXECUTION POINT of layer `lskip`, in-order, NOT before or after.
+    nnsight 0.7 enforces execution-order access."""
+    layers   = _layers
+    norm     = _norm
     n_layers = _n_layers
 
     saved_inputs = []
@@ -171,20 +165,21 @@ def trace_intervened(llm, prompt, lskip, t, part, no_skip_front, input_attr):
 
     with torch.no_grad():
         with llm.trace(prompt, remote=llm.remote):
-            # Step 1: register ALL the saves BEFORE the intervention
-            for layer in layers:
+            for li, layer in enumerate(layers):
+                # 1. Save input first
                 if input_attr == "input":
                     saved_inputs.append(layer.input[0].save())
                 else:
                     saved_inputs.append(layer.inputs[0][0].save())
+                # 2. If this is the target layer, intervene NOW
+                if li == lskip:
+                    apply_intervention(layer, t, part, no_skip_front, input_attr)
+            # Final post-layer residual (= input to final norm)
             saved_inputs.append(norm.input[0].save())
             saved_logits = llm.output.logits.save()
 
-            # Step 2: NOW apply the intervention on layer `lskip`
-            apply_intervention(layers[lskip], t, part, no_skip_front, input_attr)
-
     residual_diffs = _residuals_to_diffs(saved_inputs, n_layers)
-    outputs        = _realize(saved_logits).detach().float().softmax(dim=-1).cpu()
+    outputs = _realize(saved_logits).detach().float().softmax(dim=-1).cpu()
     return residual_diffs, outputs
 
 
@@ -210,7 +205,6 @@ def test_effect(llm, prompt, positions, part, no_skip_front=1):
                 (get_future(residual_log, t) - get_future(new_logs, t)).norm(dim=-1)
                 / get_future(residual_log, t).norm(dim=-1).clamp(min=1e-6)
             )
-
             diffs.append(relative_diffs.max(dim=-1).values)
             out_diffs.append(
                 (get_future(new_outputs, t) - get_future(outputs, t)).norm(dim=-1).max(dim=-1).values
@@ -263,7 +257,6 @@ def run(llm, model_name):
 
     for what in ["layer", "mlp", "attention"]:
         print(f"\n===== Experiment: {what} =====")
-        dall    = []
         d_max   = torch.zeros([1])
         dout_max = torch.zeros([1])
 
@@ -274,20 +267,15 @@ def run(llm, model_name):
             diff_now, diff_out = test_future_max_effect(llm, prompt, part=what)
             d_max    = torch.max(d_max,    diff_now)
             dout_max = torch.max(dout_max, diff_out)
-            dall.append(diff_now)
 
         fig = plot_layer_diffs(d_max)
-        fig.savefig(
-            os.path.join(target_dir, f"{model_name}_future_max_effect_{what}.pdf"),
-            bbox_inches="tight"
-        )
+        fig.savefig(os.path.join(target_dir, f"{model_name}_future_max_effect_{what}.pdf"),
+                    bbox_inches="tight")
         plt.close(fig)
 
         fig = plot_logit_diffs(dout_max)
-        fig.savefig(
-            os.path.join(target_dir, f"{model_name}_future_max_effect_out_{what}.pdf"),
-            bbox_inches="tight"
-        )
+        fig.savefig(os.path.join(target_dir, f"{model_name}_future_max_effect_out_{what}.pdf"),
+                    bbox_inches="tight")
         plt.close(fig)
 
     print(f"\nAll plots saved to {target_dir}/")
@@ -308,8 +296,7 @@ def main():
     _lm_head  = get_lm_head(llm)
     _n_layers = len(_layers)
 
-    legal_dataset = LegalDataset()
-    test_prompt = next(iter(legal_dataset))
+    test_prompt = next(iter(LegalDataset()))
     _input_attr = probe_input_attr(llm, _layers, test_prompt)
     if _input_attr is None:
         raise RuntimeError("Cannot determine nnsight input access pattern.")
