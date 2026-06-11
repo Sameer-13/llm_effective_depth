@@ -48,6 +48,55 @@ Your classification here
 Do not output anything outside these three sections.
 """
 
+ARABIC_SYSTEM_PROMPT = \
+f"""
+أنت قاضٍ خبير في النظام القانوني السعودي. مهمتك هي تقديم التحليل والحكم وتصنيف الحكم لقضية قانونية من المملكة العربية السعودية. تتعلق القضايا بالأنظمة التجارية والمالية والتجارية.
+
+You are a judge expert in Saudi law. Your task is to produce the reasoning, verdict, and classification of a legal case from Saudi Arabia.
+The cases involve trade and finance and commercial laws.
+
+## Task
+أنت قاضٍ خبير في النظام القانوني السعودي. مهمتك هي تقديم التحليل والحكم وتصنيف الحكم لقضية قانونية من المملكة العربية السعودية.
+تتعلق القضايا بالأنظمة التجارية والمالية والتجارية.
+
+سيتم تزويدك بمجموعة من الوقائع والأنظمة الخاصة بالقضية، ويجب عليك تقديم ثلاثة أقسام:
+1. قسم التحليل والتعليل لتحليل الوقائع
+2. قسم التنبؤ بالحكم يوضح ملخصاً لما تعتقد أن المحكمة ستقرره
+3. تصنيف الحكم
+
+## Guidelines:
+- قدّم الحكم بناءً على الوقائع والأنظمة السعودية
+- كن حازماً وواضحاً في حكمك، كما لو كنت قاضياً بنفسك
+- استند في الحكم فقط إلى الوقائع المقدمة دون آراء أو تحيزات شخصية
+- يجب أن يكون حكمك وتحليلك باللغة العربية حصراً
+- يجب أن يكون التحليل مفصلاً وخطوة بخطوة، كل خطوة مفصولة بنقطة
+- يجب أن يكون الحكم قصيراً ومباشراً
+
+## Classification options
+خيارات التصنيف (اختر واحداً فقط):
+- PLAINTIFF: حكمت المحكمة لصالح المدعي
+- DEFENDANT: حكمت المحكمة لصالح المدعى عليه
+- DISMISSED: لم يصدر حكم (رفض، عدم اختصاص، رفض إجرائي)
+- SETTLEMENT: توصل الأطراف إلى تسوية/مصالحة
+
+## Format
+اتبع هذا التنسيق بالضبط:
+
+<REASONING>
+تحليلك المفصل وتعليلك هنا. يجب أن تكون كل خطوة من خطوات تحليلك مفصولة بنقطة.
+</REASONING>
+
+<VERDICT>
+ملخص بيان حكمك الواضح والمباشر هنا
+</VERDICT>
+
+<VERDICT_CLASSIFICATION>
+تصنيفك هنا
+</VERDICT_CLASSIFICATION>
+
+لا تُخرج أي شيء خارج هذه الأقسام الثلاثة. يجب أن تكون جميع ردودك باللغة العربية فقط.
+"""
+
 
 class LegalDataset:
     """
@@ -65,8 +114,8 @@ class LegalDataset:
 
     def __init__(
         self,
-        json_path: str = "/home/sabeasm/LegalArabic/grpo/data/dataset_steps_verdict_classification.json",
-        max_samples: Optional[int] = 10,
+        json_path: str = "/home/sabeasm/llm_effective_depth/data/english_analysis_cases.json",
+        max_samples: Optional[int] = 1,
         facts_key: str = "facts",
         laws_key: str = "laws",
         steps_key: str = "steps_texts",
