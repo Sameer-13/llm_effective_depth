@@ -52,9 +52,6 @@ ARABIC_SYSTEM_PROMPT = \
 f"""
 أنت قاضٍ خبير في النظام القانوني السعودي. مهمتك هي تقديم التحليل والحكم وتصنيف الحكم لقضية قانونية من المملكة العربية السعودية. تتعلق القضايا بالأنظمة التجارية والمالية والتجارية.
 
-You are a judge expert in Saudi law. Your task is to produce the reasoning, verdict, and classification of a legal case from Saudi Arabia.
-The cases involve trade and finance and commercial laws.
-
 ## Task
 أنت قاضٍ خبير في النظام القانوني السعودي. مهمتك هي تقديم التحليل والحكم وتصنيف الحكم لقضية قانونية من المملكة العربية السعودية.
 تتعلق القضايا بالأنظمة التجارية والمالية والتجارية.
@@ -71,13 +68,6 @@ The cases involve trade and finance and commercial laws.
 - يجب أن يكون حكمك وتحليلك باللغة العربية حصراً
 - يجب أن يكون التحليل مفصلاً وخطوة بخطوة، كل خطوة مفصولة بنقطة
 - يجب أن يكون الحكم قصيراً ومباشراً
-
-## Classification options
-خيارات التصنيف (اختر واحداً فقط):
-- PLAINTIFF: حكمت المحكمة لصالح المدعي
-- DEFENDANT: حكمت المحكمة لصالح المدعى عليه
-- DISMISSED: لم يصدر حكم (رفض، عدم اختصاص، رفض إجرائي)
-- SETTLEMENT: توصل الأطراف إلى تسوية/مصالحة
 
 ## Format
 اتبع هذا التنسيق بالضبط:
@@ -98,14 +88,21 @@ The cases involve trade and finance and commercial laws.
 """
 
 
+# The four classification options the model is expected to choose from.
+# These must match the strings used in the SYSTEM_PROMPT and in the
+# ground-truth JSON's "verdict_classification" field.
+CLASSIFICATION_OPTIONS = ["PLAINTIFF", "DEFENDANT", "DISMISSED", "SETTLEMENT"]
+
+
 class LegalDataset:
     """
     Dataset for legal cases loaded from a JSON file.
 
     Each sample in the JSON is a dict with:
-        - facts:       list of strings (individual fact statements)
-        - laws:        list of strings (applicable laws)
-        - steps_texts: list of strings (reasoning steps)
+        - facts:                  list of strings (individual fact statements)
+        - laws:                   list of strings (applicable laws)
+        - steps_texts:            list of strings (reasoning steps)
+        - verdict_classification: str (one of CLASSIFICATION_OPTIONS) — GT label
 
     The prompt is constructed by joining all fields and formatting
     them into a coherent legal analysis prompt, prefixed with the
@@ -114,35 +111,18 @@ class LegalDataset:
 
     def __init__(
         self,
-        json_path: str = "/home/sabeasm/llm_effective_depth/data/english_analysis_cases.json",
-        max_samples: Optional[int] = 1,
+        json_path: str = "/home/sabeasm/llm_effective_depth/data/single_arabic_case.json",
+        max_samples: Optional[int] = None,
         facts_key: str = "facts",
         laws_key: str = "laws",
         steps_key: str = "steps_texts",
+        verdict_classification_key: str = "verdict_classification",  # ← NEW
         facts_separator: str = " ",
         laws_separator: str = " ",
         steps_separator: str = " ",
-        include_steps: bool = False,       # set False if you want to hide # ground-truth reasoning from model
-        use_chat_template: bool = True,   # format as chat messages vs raw text
+        include_steps: bool = False,
+        use_chat_template: bool = True,
     ):
-        """
-        Args:
-            json_path:          Path to the JSON file.
-            max_samples:        If set, only load the first N samples.
-            facts_key:          Key for the facts list.
-            laws_key:           Key for the laws list.
-            steps_key:          Key for the reasoning steps list.
-            facts_separator:    String used to join fact entries.
-            laws_separator:     String used to join law entries.
-            steps_separator:    String used to join reasoning step entries.
-            include_steps:      Whether to include steps_texts in the prompt.
-                                Set to False if you only want facts + laws as
-                                input and treat the steps as the target/answer.
-            use_chat_template:  If True, format as [SYSTEM]...[USER]... which
-                                is what instruction-tuned models expect.
-                                If False, concatenate as plain text which is
-                                more appropriate for base models.
-        """
         if not os.path.exists(json_path):
             raise FileNotFoundError(f"JSON file not found: {json_path}")
 
@@ -151,6 +131,7 @@ class LegalDataset:
         self.facts_key = facts_key
         self.laws_key = laws_key
         self.steps_key = steps_key
+        self.verdict_classification_key = verdict_classification_key   # ← NEW
         self.facts_separator = facts_separator
         self.laws_separator = laws_separator
         self.steps_separator = steps_separator
@@ -188,84 +169,89 @@ class LegalDataset:
         return separator.join(s for s in lst if s and s.strip())
 
     def _build_user_message(self, sample: dict) -> str:
-        """
-        Build the user-turn content: facts + laws + (optionally) steps.
-        This is the actual case content the model needs to reason about.
-        """
-
-        facts = self._join(
-            sample.get(self.facts_key, []),
-            self.facts_separator
-        )
-        laws = self._join(
-            sample.get(self.laws_key, []),
-            self.laws_separator
-        )
+        facts = self._join(sample.get(self.facts_key, []), self.facts_separator)
+        laws  = self._join(sample.get(self.laws_key,  []), self.laws_separator)
 
         user_message = (
             f"## Facts\n{facts}\n\n"
             f"## Applicable Laws\n{laws}\n"
         )
 
-        # Optionally append ground-truth reasoning steps.
-        # You would set include_steps=False when you want the model to
-        # generate the reasoning from scratch (the typical evaluation setup).
-        # Set include_steps=True if you want to probe how the model processes
-        # known reasoning (useful for the residual stream analysis).
         if self.include_steps:
-            steps = self._join(
-                sample.get(self.steps_key, []),
-                self.steps_separator
-            )
+            steps = self._join(sample.get(self.steps_key, []), self.steps_separator)
             if steps:
                 user_message += f"\n## Reasoning Steps\n{steps}\n"
 
         return user_message
 
     # ------------------------------------------------------------------
+    # Ground-truth accessors  ← NEW
+    # ------------------------------------------------------------------
+
+    def get_verdict_classification(self, idx: int) -> Optional[str]:
+        """Return the ground-truth verdict_classification for sample at index `idx`.
+        Normalized to uppercase to match CLASSIFICATION_OPTIONS."""
+        v = self.data[idx].get(self.verdict_classification_key, None)
+        if v is None:
+            return None
+        return str(v).strip().upper()
+
+    def get_all_verdict_classifications(self) -> list:
+        """Return list of ground-truth verdict_classification for all loaded samples."""
+        return [self.get_verdict_classification(i) for i in range(len(self.data))]
+
+    # ------------------------------------------------------------------
     # Prompt construction
     # ------------------------------------------------------------------
 
     def format_sample(self, sample: dict) -> str:
-        """
-        Build the full prompt string from one sample dict.
-
-        Two modes controlled by self.use_chat_template:
-
-        ── use_chat_template=True (for instruction-tuned models) ────────
-        Formats as:
-            <system>
-            {SYSTEM_PROMPT}
-            </system>
-            <user>
-            {case content}
-            </user>
-
-        This is the right format for:
-            - google/gemma-4-E4B-it  (instruction-tuned)
-            - Qwen/Qwen3-8B          (instruction-tuned)
-
-        ── use_chat_template=False (for base models) ────────────────────
-        Formats as plain concatenated text:
-            {SYSTEM_PROMPT}
-
-            {case content}
-
-        This is appropriate for base (non-instruct) models where there
-        is no special chat formatting.
-        """
+        """Standard prompt: model is expected to generate REASONING + VERDICT + CLASSIFICATION."""
         user_message = self._build_user_message(sample)
 
         if self.use_chat_template:
             prompt = (
-                f"<system>\n{SYSTEM_PROMPT.strip()}\n</system>\n\n"
+                f"<system>\n{ARABIC_SYSTEM_PROMPT.strip()}\n</system>\n\n"
                 f"<user>\n{user_message.strip()}\n</user>\n\n"
                 f"<assistant>"
             )
         else:
             prompt = (
-                f"{SYSTEM_PROMPT.strip()}\n\n"
+                f"{ARABIC_SYSTEM_PROMPT.strip()}\n\n"
                 f"{user_message.strip()}"
+            )
+
+        return prompt
+
+    def format_sample_for_classification_probe(self, sample_or_idx) -> str:   # ← NEW
+        """
+        Build a prompt that ends EXACTLY where the verdict classification
+        token should appear. The model's next-token prediction is then
+        the (first token of the) classification answer.
+
+        This is the prompt used by the layer-skip accuracy experiment in
+        analyze_future_effects.py — we can't generate full text per layer
+        ablation (way too expensive), so we probe the model's next-token
+        prediction directly at the classification slot.
+        """
+        if isinstance(sample_or_idx, int):
+            sample = self.data[sample_or_idx]
+        else:
+            sample = sample_or_idx
+
+        user_message = self._build_user_message(sample)
+
+        if self.use_chat_template:
+            prompt = (
+                f"<system>\n{ARABIC_SYSTEM_PROMPT.strip()}\n</system>\n\n"
+                f"<user>\n{user_message.strip()}\n</user>\n\n"
+                f"<assistant>\n"
+                f"<VERDICT_CLASSIFICATION>\n"
+            )
+        else:
+            prompt = (
+                f"{ARABIC_SYSTEM_PROMPT.strip()}\n\n"
+                f"{user_message.strip()}\n\n"
+                f"<VERDICT_CLASSIFICATION>\n"
             )
 
         return prompt
