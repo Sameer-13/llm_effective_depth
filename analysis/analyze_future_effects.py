@@ -25,9 +25,28 @@ import torch
 from lib.models import create_model
 from lib.nnsight_tokenize import tokenize
 from lib.datasets import LegalDataset
-from lib.datasets.legal import CLASSIFICATION_OPTIONS
+from lib.datasets.legal import (
+    CLASSIFICATION_OPTIONS,
+    ARABIC_TO_ENGLISH_CLASSIFICATION,
+    normalize_classification,
+)
 from lib.ndif_cache import ndif_cache_wrapper
 from lib.model_compat import get_layers, get_norm, get_lm_head, set_eval
+
+
+# ── Module-level config (set from CLI in main) ────────────────────────
+# Used by helper _make_dataset() so every place we instantiate
+# LegalDataset gets the same language/path consistently.
+_language: str = "english"
+_data_path: Optional[str] = None
+
+
+def _make_dataset() -> LegalDataset:
+    """Build a LegalDataset using the language/data_path chosen via CLI."""
+    kwargs = {"language": _language}
+    if _data_path is not None:
+        kwargs["json_path"] = _data_path
+    return LegalDataset(**kwargs)
 
 
 # ── Plotting helpers ──────────────────────────────────────────────────
@@ -314,16 +333,11 @@ def probe_input_attr(llm, layers, prompt):
     return None
 
 
-# ── NEW: Generate full text completions per sample, save to JSON ──────
+# ── Generate full text completions per sample, save to JSON ───────────
 
 def generate_completion(llm, prompt, max_new_tokens=2048,
                         stop_strings=("</VERDICT_CLASSIFICATION>",)):
-    """Greedy text generation. Returns (completion, was_truncated, n_generated_tokens).
-
-    Stops early when any of `stop_strings` appears in the generated text,
-    so we don't waste tokens generating past the answer. If neither EOS
-    nor a stop string is hit, generation runs until `max_new_tokens` and
-    `was_truncated` will be True."""
+    """Greedy text generation. Returns (completion, was_truncated, n_generated_tokens)."""
     from transformers import StoppingCriteria, StoppingCriteriaList
 
     tokenizer = llm.tokenizer
@@ -338,8 +352,6 @@ def generate_completion(llm, prompt, max_new_tokens=2048,
     if pad_token_id is None:
         pad_token_id = tokenizer.eos_token_id
 
-    # Custom stopping criterion: stop as soon as one of `stop_strings`
-    # appears in the decoded newly-generated text.
     class _StopOnString(StoppingCriteria):
         def __init__(self, tokenizer, stop_strings, prompt_length):
             super().__init__()
@@ -370,60 +382,61 @@ def generate_completion(llm, prompt, max_new_tokens=2048,
     new_tokens   = output_ids[0, input_length:]
     completion   = tokenizer.decode(new_tokens, skip_special_tokens=True)
     n_generated  = int(new_tokens.shape[0])
-    # Truncated = hit max_new_tokens without finishing
     was_truncated = (n_generated >= max_new_tokens
                      and not any(s in completion for s in stop_strings))
     return completion, was_truncated, n_generated
 
 
-def extract_predicted_classification(completion: str) -> Optional[str]:
-    """Try to extract the predicted classification from a generated completion.
+def extract_predicted_classification(completion):
+    """Strict extraction: ONLY parse from inside the
+    <VERDICT_CLASSIFICATION>...</VERDICT_CLASSIFICATION> tag.
 
-    Strategy (in order):
-      1. Look for <VERDICT_CLASSIFICATION>VALUE</VERDICT_CLASSIFICATION>
-      2. Look for <VERDICT_CLASSIFICATION>VALUE (no closing tag)
-      3. Fall back to first occurrence of any CLASSIFICATION_OPTION word in text
+    Returns:
+      - Canonical English label (one of CLASSIFICATION_OPTIONS) if found.
+      - None if:
+          * the completion is empty,
+          * the <VERDICT_CLASSIFICATION> tag is missing entirely, OR
+          * the content inside the tag can't be mapped to a known label.
+
+    Returning None signals "no valid prediction" — the evaluator will
+    treat None as a wrong prediction (`is_correct = False`).
+
+    Handles both English and Arabic labels inside the tag via
+    normalize_classification().
     """
-    # Try with closing tag first
+    if not completion:
+        return None
+
+    # Look for the full tagged section (closing tag present)
     m = re.search(
-        r'<VERDICT_CLASSIFICATION>\s*([A-Z]+)\s*</VERDICT_CLASSIFICATION>',
-        completion, re.IGNORECASE
+        r'<VERDICT_CLASSIFICATION>\s*(.+?)\s*</VERDICT_CLASSIFICATION>',
+        completion, re.IGNORECASE | re.DOTALL
     )
     if not m:
-        # Try without closing tag
+        # Tag may be missing its closing form because generation was truncated
+        # mid-tag. Accept content from the opening tag up to a blank line or EOS.
         m = re.search(
-            r'<VERDICT_CLASSIFICATION>\s*([A-Z]+)',
-            completion, re.IGNORECASE
+            r'<VERDICT_CLASSIFICATION>\s*(.+?)(?:\n\n|\Z)',
+            completion, re.IGNORECASE | re.DOTALL
         )
 
-    if m:
-        candidate = m.group(1).strip().upper()
-        if candidate in CLASSIFICATION_OPTIONS:
-            return candidate
-        # Partial-match (e.g. model wrote "PLAINTIFFS")
-        for opt in CLASSIFICATION_OPTIONS:
-            if candidate.startswith(opt) or opt.startswith(candidate):
-                return opt
-        return candidate   # return raw — caller can flag as malformed
+    if not m:
+        # No tag at all — refuse to guess. Treat as no prediction.
+        return None
 
-    # Last-resort fallback: any classification keyword anywhere in the text
-    upper = completion.upper()
-    for opt in CLASSIFICATION_OPTIONS:
-        if opt in upper:
-            return opt
-    return None
+    candidate = m.group(1).strip()
+    if not candidate:
+        return None
+
+    # normalize_classification returns None if the content can't be mapped.
+    return normalize_classification(candidate)
 
 
 def save_completions_json(llm, model_name, target_dir, max_new_tokens=2048):
-    """Generate full text completions for every sample and save to a JSON file.
-
-    Output file: <target_dir>/<model_name>_completions.json
-    Each entry contains: sample_idx, ground_truth, predicted_from_text,
-                          is_correct, n_generated_tokens, was_truncated, completion.
-    """
+    """Generate full text completions for every sample and save to JSON."""
     print("\n===== Generating full text completions (no intervention) =====")
 
-    legal_dataset = LegalDataset()
+    legal_dataset = _make_dataset()
     ground_truths = legal_dataset.get_all_verdict_classifications()
     n_samples = len(legal_dataset)
     print(f"Will generate completions for {n_samples} samples "
@@ -486,7 +499,6 @@ def save_completions_json(llm, model_name, target_dir, max_new_tokens=2048):
     if n_truncated > 0:
         print(f"WARNING: {n_truncated}/{n_samples} completions hit max_new_tokens "
               f"({max_new_tokens}) without finishing.")
-        print(f"  Increase --max-new-tokens for complete responses on those samples.")
 
 
 # ── Per-layer full-completion experiment ──────────────────────────────
@@ -494,17 +506,7 @@ def save_completions_json(llm, model_name, target_dir, max_new_tokens=2048):
 def generate_completion_with_layer_skip(llm, prompt, skip_layer=None,
                                         max_new_tokens=2048,
                                         stop_strings=("</VERDICT_CLASSIFICATION>",)):
-    """Generate text autoregressively with one decoder layer fully ablated
-    (identity) for every position, for every forward pass.
-
-    Implementation: run a manual token-by-token greedy loop. At each step,
-    open an nnsight trace, apply the layer-skip intervention, save the
-    last-position logits, decode the argmax, append to the sequence, and
-    repeat. This is the only way to apply an nnsight intervention to every
-    step of generation.
-
-    Returns (completion_text, was_truncated, n_generated_tokens).
-    """
+    """Token-by-token greedy generation with one decoder layer fully ablated."""
     tokenizer = llm.tokenizer
     model     = llm._model
     layers    = _layers
@@ -519,14 +521,11 @@ def generate_completion_with_layer_skip(llm, prompt, skip_layer=None,
         pad_token_id = tokenizer.eos_token_id
     eos_token_id = tokenizer.eos_token_id
 
-    generated_ids = []   # list of new token ids
-    cur_ids = input_ids  # rolling sequence
+    generated_ids = []
+    cur_ids = input_ids
 
     stop_hit = False
     for step in range(max_new_tokens):
-        # Build a prompt string for nnsight trace from current token IDs.
-        # We use tokenizer.decode to get back the string; this is what
-        # nnsight expects (it re-tokenizes internally).
         cur_text = tokenizer.decode(cur_ids[0], skip_special_tokens=False)
 
         saved_logits = None
@@ -540,18 +539,16 @@ def generate_completion_with_layer_skip(llm, prompt, skip_layer=None,
                         )
                 saved_logits = llm.output.logits.save()
 
-        logits = _last_position_logits(saved_logits)   # [vocab]
+        logits = _last_position_logits(saved_logits)
         next_id = int(logits.argmax().item())
         generated_ids.append(next_id)
         cur_ids = torch.cat(
             [cur_ids, torch.tensor([[next_id]], device=device)], dim=1
         )
 
-        # EOS stop
         if eos_token_id is not None and next_id == eos_token_id:
             break
 
-        # Stop-string check (decode generated portion and look for marker)
         decoded_new = tokenizer.decode(generated_ids, skip_special_tokens=True)
         if any(s in decoded_new for s in stop_strings):
             stop_hit = True
@@ -567,18 +564,10 @@ def generate_completion_with_layer_skip(llm, prompt, skip_layer=None,
 def run_layer_skip_completions(llm, model_name, target_dir,
                                 max_new_tokens=2048,
                                 skip_layers=None):
-    """For each (sample, layer-to-skip), generate the full model response with
-    that layer ablated. Save everything to one big JSON.
-
-    Args:
-        skip_layers: iterable of layer indices to ablate. None means all layers.
-                     Also implicitly includes the baseline (no skip).
-
-    Output file: <target_dir>/<model_name>_layer_skip_completions.json
-    """
+    """For each (sample, layer-to-skip), generate the full model response."""
     print("\n===== Per-layer full-completion experiment =====")
 
-    legal_dataset = LegalDataset()
+    legal_dataset = _make_dataset()
     ground_truths = legal_dataset.get_all_verdict_classifications()
     n_samples = len(legal_dataset)
 
@@ -589,14 +578,11 @@ def run_layer_skip_completions(llm, model_name, target_dir,
           f"(plus baseline). max_new_tokens={max_new_tokens}.")
     print("This will take a while — each generation runs one trace per token.")
 
-    # Pre-build all prompts (using the standard format_sample)
     prompts = [legal_dataset.format_sample(legal_dataset.data[i])
                for i in range(n_samples)]
 
-    # Result structure: list of records, each record is one (skip_layer, sample) cell
     records = []
 
-    # ── Baseline (no skip) for each sample ────────────────────────
     print("\nGenerating baseline (no skip)...")
     for idx in range(n_samples):
         gt = ground_truths[idx]
@@ -617,11 +603,8 @@ def run_layer_skip_completions(llm, model_name, target_dir,
             "n_generated_tokens": n_gen,
             "was_truncated": was_truncated,
         })
-
-        # Save incrementally so a long crash doesn't lose progress
         _save_records(records, model_name, target_dir)
 
-    # ── Per-layer ablations ───────────────────────────────────────
     for li_pos, lskip in enumerate(skip_layers):
         print(f"\nGenerating with layer {lskip} skipped "
               f"({li_pos+1}/{len(skip_layers)})...")
@@ -645,7 +628,6 @@ def run_layer_skip_completions(llm, model_name, target_dir,
                 "n_generated_tokens": n_gen,
                 "was_truncated": was_truncated,
             })
-
             _save_records(records, model_name, target_dir)
 
     print(f"\nDone. Total records: {len(records)}")
@@ -653,7 +635,6 @@ def run_layer_skip_completions(llm, model_name, target_dir,
 
 
 def _save_records(records, model_name, target_dir):
-    """Helper: save the records list to JSON. Called after every record."""
     out_path = os.path.join(target_dir, f"{model_name}_layer_skip_completions.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
@@ -662,8 +643,7 @@ def _save_records(records, model_name, target_dir):
 # ── Build accuracy plot from saved completions JSON ───────────────────
 
 def build_accuracy_plot_from_completions(model_name, target_dir):
-    """Read the per-layer completions JSON, extract predicted classifications,
-    compute accuracy per skipped layer, plot the bar chart."""
+    """Read per-layer completions JSON, extract classifications, plot accuracy."""
     print("\n===== Building accuracy plot from saved completions =====")
 
     json_path = os.path.join(target_dir, f"{model_name}_layer_skip_completions.json")
@@ -674,27 +654,23 @@ def build_accuracy_plot_from_completions(model_name, target_dir):
     with open(json_path, "r", encoding="utf-8") as f:
         records = json.load(f)
 
-    # Extract predictions and group by skip_layer
-    by_layer = {}    # skip_layer (None or int) -> list of (gt, pred, correct)
+    by_layer = {}
     for r in records:
         skip = r["skip_layer"]
         gt   = r["ground_truth_classification"]
         comp = r.get("completion")
         pred = extract_predicted_classification(comp) if comp else None
         is_correct = (pred is not None and gt is not None and pred == gt)
-        # Annotate the record in-place for re-saving
         r["predicted_classification_from_text"] = pred
         r["is_correct"] = is_correct
         by_layer.setdefault(skip, []).append((gt, pred, is_correct))
 
-    # Save annotated records back
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
 
-    # Compute accuracy per layer
     def acc_for(skip_key):
         bucket = by_layer.get(skip_key, [])
-        bucket = [b for b in bucket if b[0] is not None]  # need GT
+        bucket = [b for b in bucket if b[0] is not None]
         if not bucket:
             return None, 0
         n_correct = sum(1 for _, _, c in bucket if c)
@@ -720,7 +696,6 @@ def build_accuracy_plot_from_completions(model_name, target_dir):
         print(f"  Layer {lskip:3d} skipped: accuracy = {accuracies[-1]:.2%}  "
               f"(n={sample_counts[-1]})")
 
-    # Plot
     fig = plt.figure(figsize=(8, 3))
     plt.bar(list(range(n_layers)), accuracies)
     plt.axhline(y=baseline_acc, color='red', linestyle='--', linewidth=1.5,
@@ -738,36 +713,20 @@ def build_accuracy_plot_from_completions(model_name, target_dir):
     print(f"Saved plot: {out_path}")
 
 
-# ── NEW: Classification accuracy experiment ───────────────────────────
+# ── Probe-based classification accuracy (legacy, unused) ──────────────
 
 def _get_option_first_tokens(llm):
-    """For each CLASSIFICATION_OPTION, find the first token id under the model's
-    tokenizer. Warn if they're not all distinct (first-token scoring would
-    be unable to distinguish them)."""
     tokenizer = llm.tokenizer
     first_tokens = {}
     for opt in CLASSIFICATION_OPTIONS:
         ids = tokenizer.encode(opt, add_special_tokens=False)
         if not ids:
-            raise ValueError(f"Tokenizer returned empty token list for {opt!r}")
+            raise ValueError(f"Tokenizer returned empty for {opt!r}")
         first_tokens[opt] = ids[0]
-
-    distinct = len(set(first_tokens.values())) == len(first_tokens)
-    if not distinct:
-        print("WARNING: classification options share first tokens — predictions may be unreliable:")
-    else:
-        print("First-token IDs for classification options:")
-    for opt, tid in first_tokens.items():
-        try:
-            decoded = tokenizer.decode([tid])
-        except Exception:
-            decoded = "?"
-        print(f"  {opt!r:14s} -> token id {tid:6d}  ({decoded!r})")
     return first_tokens
 
 
 def _last_position_logits(saved_logits):
-    """Pull logits at the last sequence position from a saved nnsight tensor."""
     raw = _realize(saved_logits).detach().float().cpu()
     if raw.dim() == 3:
         return raw[0, -1, :]
@@ -776,106 +735,16 @@ def _last_position_logits(saved_logits):
     return raw
 
 
-def _predict_classification(llm, prompt, option_first_tokens, skip_layer=None):
-    """Run one forward pass (optionally with layer `skip_layer` fully skipped)
-    and return (predicted_option, scores_dict).
-
-    Prediction = the option whose first token has the highest logit at the
-    last position of the prompt."""
-    layers = _layers
-
-    saved_logits = None
-    with torch.no_grad():
-        with llm.trace(prompt, remote=llm.remote):
-            for li, layer in enumerate(layers):
-                if li == skip_layer:
-                    # Full layer skip across all positions: t=None, no_skip_front=0
-                    apply_intervention(
-                        layer, t=None, part="layer", no_skip_front=0,
-                        input_attr=_input_attr, precomputed_mlp=None
-                    )
-            saved_logits = llm.output.logits.save()
-
-    logits = _last_position_logits(saved_logits)
-    scores = {opt: logits[tok].item() for opt, tok in option_first_tokens.items()}
-    return max(scores, key=scores.get), scores
-
-
-def run_classification_accuracy(llm, model_name, target_dir):
-    """Per-layer ablation: skip each layer fully and check classification accuracy."""
-    print("\n===== Experiment: classification accuracy =====")
-
-    legal_dataset = LegalDataset()
-    ground_truths = legal_dataset.get_all_verdict_classifications()
-
-    # Filter to samples with a valid ground-truth label
-    sample_indices = [i for i, gt in enumerate(ground_truths)
-                      if gt is not None and gt in CLASSIFICATION_OPTIONS]
-    if not sample_indices:
-        bad_values = set(gt for gt in ground_truths if gt is not None)
-        print("No samples have a valid verdict_classification ground truth.")
-        if bad_values:
-            print(f"  Found these GT values, none matching {CLASSIFICATION_OPTIONS}: {bad_values}")
-        print("Skipping classification accuracy experiment.")
-        return
-
-    n_samples = len(sample_indices)
-    print(f"Using {n_samples} samples with valid GT classification.")
-
-    option_first_tokens = _get_option_first_tokens(llm)
-    n_layers = _n_layers
-
-    # Build classification-probe prompts once per sample
-    prompts = {
-        i: legal_dataset.format_sample_for_classification_probe(legal_dataset.data[i])
-        for i in sample_indices
-    }
-
-    # Baseline accuracy (no layer skipped)
-    print("\nComputing baseline (no skip)...")
-    baseline_correct = 0
-    for i in sample_indices:
-        pred, _ = _predict_classification(llm, prompts[i], option_first_tokens,
-                                          skip_layer=None)
-        gt = ground_truths[i]
-        if pred == gt:
-            baseline_correct += 1
-    baseline_acc = baseline_correct / n_samples
-    print(f"  Baseline accuracy: {baseline_acc:.2%} ({baseline_correct}/{n_samples})")
-
-    # Per-layer ablation accuracy
-    print("\nRunning per-layer ablation...")
-    accuracies = []
-    for lskip in range(n_layers):
-        correct = 0
-        for i in sample_indices:
-            pred, _ = _predict_classification(llm, prompts[i], option_first_tokens,
-                                              skip_layer=lskip)
-            gt = ground_truths[i]
-            if pred == gt:
-                correct += 1
-        acc = correct / n_samples
-        accuracies.append(acc)
-        print(f"  Layer {lskip:3d} skipped: accuracy = {acc:.2%} ({correct}/{n_samples})")
-
-    # Plot
-    fig = plot_accuracy_bars(accuracies, baseline_acc, n_samples, model_name)
-    out_path = os.path.join(target_dir, f"{model_name}_classification_accuracy.pdf")
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"\nSaved {out_path}")
-
-
 # ── Main run ──────────────────────────────────────────────────────────
 
 def run(llm, model_name, parts, do_completions, do_accuracy,
-        n_examples=10, max_new_tokens=512, output_dir="out/future_effects"):
+        n_examples=10, max_new_tokens=2048, output_dir="out/future_effects"):
     random.seed(123)
 
     target_dir = output_dir
     os.makedirs(target_dir, exist_ok=True)
 
-    legal_dataset = LegalDataset()
+    legal_dataset = _make_dataset()
     n_prompts = min(n_examples, len(legal_dataset))
 
     # ── Sublayer ablation experiments ──────────────────────────────
@@ -906,7 +775,7 @@ def run(llm, model_name, parts, do_completions, do_accuracy,
     else:
         print("\n[Skipping] all sublayer ablation experiments")
 
-    # ── Full text completions (baseline only, no intervention) ─────
+    # ── Baseline full text completions ─────────────────────────────
     if do_completions:
         save_completions_json(llm, model_name, target_dir,
                               max_new_tokens=max_new_tokens)
@@ -915,13 +784,11 @@ def run(llm, model_name, parts, do_completions, do_accuracy,
 
     # ── Per-layer full completions + accuracy plot ─────────────────
     if do_accuracy:
-        # 1. Generate completions with each layer ablated (expensive)
         run_layer_skip_completions(
             llm, model_name, target_dir,
             max_new_tokens=max_new_tokens,
-            skip_layers=None,   # None = all layers
+            skip_layers=None,
         )
-        # 2. Extract classifications from saved JSON and plot
         build_accuracy_plot_from_completions(model_name, target_dir)
     else:
         print("\n[Skipping] per-layer completion generation + accuracy plot")
@@ -935,20 +802,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run everything (default)
+  # Run everything (default: english)
   python analyze_future_effects.py qwen3_8b
 
-  # Only the 'layer' sublayer experiment, skip everything else
-  python analyze_future_effects.py qwen3_8b --parts layer --no-completions --no-accuracy
+  # Arabic system prompt + custom data file
+  python analyze_future_effects.py qwen3_8b \\
+      --language arabic \\
+      --data-path /home/sabeasm/llm_effective_depth/data/arabic_cases.json \\
+      --output-dir out/arabic_full
 
-  # Skip MLP and attention; keep completions + accuracy
-  python analyze_future_effects.py qwen3_8b --parts layer
+  # Only the 'layer' sublayer experiment, English, custom file
+  python analyze_future_effects.py qwen3_8b \\
+      --parts layer --no-completions --no-accuracy \\
+      --data-path /home/sabeasm/llm_effective_depth/data/english_cases.json
 
-  # Just the classification accuracy probe, nothing else
-  python analyze_future_effects.py qwen3_8b --parts --no-completions
-
-  # Just the completions JSON, nothing else
-  python analyze_future_effects.py qwen3_8b --parts --no-accuracy
+  # Replot accuracy bar chart from a saved JSON (no GPU work)
+  python analyze_future_effects.py qwen3_8b --replot-only --output-dir out/arabic_full
 """
     )
     parser.add_argument(
@@ -956,14 +825,22 @@ Examples:
         help="Model name from lib.models (e.g. qwen3_8b, gemma_4_e4b)"
     )
     parser.add_argument(
-        "--parts",
-        nargs="*",
+        "--parts", nargs="*",
         default=["layer", "mlp", "attention"],
         choices=["layer", "mlp", "attention"],
         metavar="PART",
         help="Which sublayer ablation experiments to run. "
-             "Choices: layer, mlp, attention. "
              "Default: all three. Pass --parts with no value to skip all."
+    )
+    parser.add_argument(
+        "--language", choices=["english", "arabic"], default="english",
+        help="System prompt language: 'english' (default) or 'arabic'. "
+             "Determines which system prompt LegalDataset uses."
+    )
+    parser.add_argument(
+        "--data-path", type=str, default=None,
+        help="Path to the legal cases JSON file. "
+             "If omitted, LegalDataset's default path is used."
     )
     parser.add_argument(
         "--no-completions", action="store_true",
@@ -971,7 +848,7 @@ Examples:
     )
     parser.add_argument(
         "--no-accuracy", action="store_true",
-        help="Skip the classification accuracy bar chart experiment"
+        help="Skip the per-layer completion generation + accuracy plot"
     )
     parser.add_argument(
         "--n-examples", type=int, default=10,
@@ -979,8 +856,7 @@ Examples:
     )
     parser.add_argument(
         "--max-new-tokens", type=int, default=2048,
-        help="Max new tokens per generated completion (default: 2048). "
-             "Generation also stops early when </VERDICT_CLASSIFICATION> appears."
+        help="Max new tokens per generated completion (default: 2048)."
     )
     parser.add_argument(
         "--output-dir", type=str, default="out/future_effects",
@@ -989,27 +865,26 @@ Examples:
     parser.add_argument(
         "--replot-only", action="store_true",
         help="Skip ALL generation/trace work. Just re-read the existing "
-             "<model>_layer_skip_completions.json and rebuild the accuracy "
-             "plot from it. Useful after editing extract_predicted_classification."
+             "<model>_layer_skip_completions.json and rebuild the accuracy plot."
     )
     args = parser.parse_args()
 
-    # Declare globals ONCE, before any branch references them.
+    # Set globals BEFORE any branch references them.
     global _layers, _norm, _lm_head, _n_layers, _input_attr
+    global _language, _data_path
+    _language  = args.language
+    _data_path = args.data_path
 
     # ── Short-circuit: just rebuild the plot from saved JSON ──────
     if args.replot_only:
         target_dir = args.output_dir
-        # We still need _n_layers for the plot, so load the model.
-        # (Cheap if the JSON exists — we just won't run any traces.)
         llm = create_model(args.model_name, force_local=False)
         set_eval(llm)
         _layers   = get_layers(llm)
         _norm     = get_norm(llm)
         _lm_head  = get_lm_head(llm)
         _n_layers = len(_layers)
-        _input_attr = "input"   # unused in this code path
-
+        _input_attr = "input"
         build_accuracy_plot_from_completions(args.model_name, target_dir)
         return
 
@@ -1021,7 +896,7 @@ Examples:
     _lm_head  = get_lm_head(llm)
     _n_layers = len(_layers)
 
-    test_prompt = next(iter(LegalDataset()))
+    test_prompt = next(iter(_make_dataset()))
     _input_attr = probe_input_attr(llm, _layers, test_prompt)
     if _input_attr is None:
         raise RuntimeError("Cannot determine nnsight input access pattern.")
@@ -1033,6 +908,8 @@ Examples:
     print(f"  Model:           {args.model_name}")
     print(f"  N text layers:   {_n_layers}")
     print(f"  Input attr:      {_input_attr}")
+    print(f"  Language:        {args.language}")
+    print(f"  Data path:       {args.data_path or '(default in legal.py)'}")
     print(f"  Sublayer parts:  {args.parts if args.parts else '(none — skip all)'}")
     print(f"  Completions:     {'skip' if args.no_completions else 'run'}")
     print(f"  Accuracy probe:  {'skip' if args.no_accuracy else 'run'}")
@@ -1040,6 +917,15 @@ Examples:
     print(f"  Max new tokens:  {args.max_new_tokens}")
     print(f"  Output dir:      {args.output_dir}")
     print("=" * 60)
+
+    # Show how many samples got loaded — to make the "1 completion" mystery obvious
+    n_loaded = len(_make_dataset())
+    print(f"\nLoaded {n_loaded} samples from "
+          f"{args.data_path or '(default path)'}")
+    if n_loaded == 1:
+        print("  ↑ NOTE: only 1 sample was loaded. If you expected more, "
+              "check that --data-path points to a file with multiple cases.")
+    print()
 
     run(llm, args.model_name,
         parts=args.parts,
