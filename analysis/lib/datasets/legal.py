@@ -55,7 +55,6 @@ f"""
 ## Task
 أنت قاضٍ خبير في النظام القانوني السعودي. مهمتك هي تقديم التحليل والحكم وتصنيف الحكم لقضية قانونية من المملكة العربية السعودية.
 تتعلق القضايا بالأنظمة التجارية والمالية والتجارية.
-
 سيتم تزويدك بمجموعة من الوقائع والأنظمة الخاصة بالقضية، ويجب عليك تقديم ثلاثة أقسام:
 1. قسم التحليل والتعليل لتحليل الوقائع
 2. قسم التنبؤ بالحكم يوضح ملخصاً لما تعتقد أن المحكمة ستقرره
@@ -68,6 +67,13 @@ f"""
 - يجب أن يكون حكمك وتحليلك باللغة العربية حصراً
 - يجب أن يكون التحليل مفصلاً وخطوة بخطوة، كل خطوة مفصولة بنقطة
 - يجب أن يكون الحكم قصيراً ومباشراً
+
+## Classification options
+خيارات التصنيف (اختر خيارًا واحدًا فقط):
+- المدعي: حكمت المحكمة لصالح المدعي
+- المدعى عليه: حكمت المحكمة لصالح المدعى عليه
+- رفض الدعوى: لم يصدر حكم في الموضوع (رفض الدعوى، عدم الاختصاص، أو رفض إجرائي)
+- تسوية: توصل الأطراف إلى تسوية أو صلح
 
 ## Format
 اتبع هذا التنسيق بالضبط:
@@ -88,10 +94,52 @@ f"""
 """
 
 
-# The four classification options the model is expected to choose from.
-# These must match the strings used in the SYSTEM_PROMPT and in the
-# ground-truth JSON's "verdict_classification" field.
+# Canonical English classification options.
 CLASSIFICATION_OPTIONS = ["PLAINTIFF", "DEFENDANT", "DISMISSED", "SETTLEMENT"]
+
+# Map Arabic classification labels (as written in ARABIC_SYSTEM_PROMPT) to
+# their canonical English form. Used so an Arabic completion can be compared
+# against the English ground-truth label during evaluation.
+#
+# IMPORTANT: keep keys in sync with the labels in ARABIC_SYSTEM_PROMPT's
+# "## Classification options" section.
+ARABIC_TO_ENGLISH_CLASSIFICATION = {
+    "المدعي":      "PLAINTIFF",
+    "المدعى عليه": "DEFENDANT",
+    "رفض الدعوى":  "DISMISSED",
+    "تسوية":       "SETTLEMENT",
+}
+
+
+def normalize_classification(label):
+    """Normalize a classification string to its canonical English form.
+
+    Accepts:
+      - English label (PLAINTIFF / DEFENDANT / DISMISSED / SETTLEMENT,
+        case-insensitive, possibly with extra surrounding text)
+      - Arabic label (المدعي, المدعى عليه, رفض الدعوى, تسوية)
+    Returns one of CLASSIFICATION_OPTIONS, or None if no match.
+    """
+    if label is None:
+        return None
+    s = str(label).strip()
+    if not s:
+        return None
+
+    # Try Arabic first; check longer keys first so "المدعى عليه" wins over "المدعى".
+    for ar, en in sorted(
+        ARABIC_TO_ENGLISH_CLASSIFICATION.items(), key=lambda p: -len(p[0])
+    ):
+        if ar in s:
+            return en
+
+    # English (substring match, case-insensitive)
+    su = s.upper()
+    for opt in CLASSIFICATION_OPTIONS:
+        if opt in su:
+            return opt
+
+    return None
 
 
 class LegalDataset:
@@ -102,21 +150,18 @@ class LegalDataset:
         - facts:                  list of strings (individual fact statements)
         - laws:                   list of strings (applicable laws)
         - steps_texts:            list of strings (reasoning steps)
-        - verdict_classification: str (one of CLASSIFICATION_OPTIONS) — GT label
-
-    The prompt is constructed by joining all fields and formatting
-    them into a coherent legal analysis prompt, prefixed with the
-    system prompt.
+        - verdict_classification: str (English or Arabic) — GT label
     """
 
     def __init__(
         self,
         json_path: str = "/home/sabeasm/llm_effective_depth/data/single_arabic_case.json",
         max_samples: Optional[int] = None,
+        language: str = "english",                 # ← NEW: "english" or "arabic"
         facts_key: str = "facts",
         laws_key: str = "laws",
         steps_key: str = "steps_texts",
-        verdict_classification_key: str = "verdict_classification",  # ← NEW
+        verdict_classification_key: str = "verdict_classification",
         facts_separator: str = " ",
         laws_separator: str = " ",
         steps_separator: str = " ",
@@ -126,12 +171,19 @@ class LegalDataset:
         if not os.path.exists(json_path):
             raise FileNotFoundError(f"JSON file not found: {json_path}")
 
+        lang = language.lower().strip()
+        if lang not in ("english", "arabic"):
+            raise ValueError(
+                f"Unsupported language {language!r}. Use 'english' or 'arabic'."
+            )
+
         self.json_path = json_path
         self.max_samples = max_samples
+        self.language = lang
         self.facts_key = facts_key
         self.laws_key = laws_key
         self.steps_key = steps_key
-        self.verdict_classification_key = verdict_classification_key   # ← NEW
+        self.verdict_classification_key = verdict_classification_key
         self.facts_separator = facts_separator
         self.laws_separator = laws_separator
         self.steps_separator = steps_separator
@@ -141,29 +193,22 @@ class LegalDataset:
         self.data = self._load(json_path)
 
     # ------------------------------------------------------------------
-    # Loading
-    # ------------------------------------------------------------------
+
+    def _get_system_prompt(self) -> str:
+        return ARABIC_SYSTEM_PROMPT if self.language == "arabic" else SYSTEM_PROMPT
 
     def _load(self, json_path: str):
         with open(json_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-
         if not isinstance(raw, list):
             raise ValueError(
                 f"Expected a JSON list at the top level, got {type(raw)}"
             )
-
         if self.max_samples is not None:
             raw = raw[: self.max_samples]
-
         return raw
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def _join(self, lst, separator):
-        """Join a list of strings, filtering out empty entries."""
         if lst is None:
             return ""
         return separator.join(s for s in lst if s and s.strip())
@@ -185,19 +230,17 @@ class LegalDataset:
         return user_message
 
     # ------------------------------------------------------------------
-    # Ground-truth accessors  ← NEW
+    # Ground-truth accessors — always return canonical English
     # ------------------------------------------------------------------
 
     def get_verdict_classification(self, idx: int) -> Optional[str]:
-        """Return the ground-truth verdict_classification for sample at index `idx`.
-        Normalized to uppercase to match CLASSIFICATION_OPTIONS."""
+        """Return the ground-truth label for sample `idx`, normalized to
+        canonical English (so it can be compared against any prediction
+        regardless of the prediction's language)."""
         v = self.data[idx].get(self.verdict_classification_key, None)
-        if v is None:
-            return None
-        return str(v).strip().upper()
+        return normalize_classification(v)
 
     def get_all_verdict_classifications(self) -> list:
-        """Return list of ground-truth verdict_classification for all loaded samples."""
         return [self.get_verdict_classification(i) for i in range(len(self.data))]
 
     # ------------------------------------------------------------------
@@ -205,59 +248,39 @@ class LegalDataset:
     # ------------------------------------------------------------------
 
     def format_sample(self, sample: dict) -> str:
-        """Standard prompt: model is expected to generate REASONING + VERDICT + CLASSIFICATION."""
-        user_message = self._build_user_message(sample)
+        system_prompt = self._get_system_prompt()
+        user_message  = self._build_user_message(sample)
 
         if self.use_chat_template:
-            prompt = (
-                f"<system>\n{ARABIC_SYSTEM_PROMPT.strip()}\n</system>\n\n"
+            return (
+                f"<system>\n{system_prompt.strip()}\n</system>\n\n"
                 f"<user>\n{user_message.strip()}\n</user>\n\n"
                 f"<assistant>"
             )
-        else:
-            prompt = (
-                f"{ARABIC_SYSTEM_PROMPT.strip()}\n\n"
-                f"{user_message.strip()}"
-            )
+        return f"{system_prompt.strip()}\n\n{user_message.strip()}"
 
-        return prompt
-
-    def format_sample_for_classification_probe(self, sample_or_idx) -> str:   # ← NEW
-        """
-        Build a prompt that ends EXACTLY where the verdict classification
-        token should appear. The model's next-token prediction is then
-        the (first token of the) classification answer.
-
-        This is the prompt used by the layer-skip accuracy experiment in
-        analyze_future_effects.py — we can't generate full text per layer
-        ablation (way too expensive), so we probe the model's next-token
-        prediction directly at the classification slot.
-        """
+    def format_sample_for_classification_probe(self, sample_or_idx) -> str:
         if isinstance(sample_or_idx, int):
             sample = self.data[sample_or_idx]
         else:
             sample = sample_or_idx
 
-        user_message = self._build_user_message(sample)
+        system_prompt = self._get_system_prompt()
+        user_message  = self._build_user_message(sample)
 
         if self.use_chat_template:
-            prompt = (
-                f"<system>\n{ARABIC_SYSTEM_PROMPT.strip()}\n</system>\n\n"
+            return (
+                f"<system>\n{system_prompt.strip()}\n</system>\n\n"
                 f"<user>\n{user_message.strip()}\n</user>\n\n"
                 f"<assistant>\n"
                 f"<VERDICT_CLASSIFICATION>\n"
             )
-        else:
-            prompt = (
-                f"{ARABIC_SYSTEM_PROMPT.strip()}\n\n"
-                f"{user_message.strip()}\n\n"
-                f"<VERDICT_CLASSIFICATION>\n"
-            )
+        return (
+            f"{system_prompt.strip()}\n\n"
+            f"{user_message.strip()}\n\n"
+            f"<VERDICT_CLASSIFICATION>\n"
+        )
 
-        return prompt
-
-    # ------------------------------------------------------------------
-    # Interface expected by the analysis scripts
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
