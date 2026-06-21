@@ -7,20 +7,21 @@ export NDIF_TOKEN=""
 ```
 Normal run with logs:
 ```bash
-python analyze_future_effects.py qwen3_8b --parts layer --language arabic --data-path /home/ubuntu/llm_effective_depth/data/single_arabic_case.json --output-dir output/arabic/single/full_comp > arabic_run.log 2>&1 &
+python analyze_future_effects.py llama_3_1_8b_instruct --parts layer --language arabic --data-path /home/ubuntu/llm_effective_depth/data/single_arabic_case.json --output-dir output/llama_3_1_8b_instruct/arabic/single/full_comp > arabic_run.log 2>&1 &
 ```
 Background run with logs:
 ```bash
 nohup python analyze_future_effects.py qwen3_8b --parts layer --language arabic --data-path /home/ubuntu/llm_effective_depth/data/single_arabic_case.json --output-dir output/arabic/single/full_comp > arabic_run.log 2>&1 &
 ```
 
+
 Command per model:
 ```bash
-python analyze_future_effects.py qwen3_8b --parts layer --no-completions --no-accuracy --language arabic --data-path /home/ubuntu/llm_effective_depth/data/arabic_analysis_cases.json --output-dir output/qwen3_8b/arabic/mutli/layer_effect/
+python analyze_future_effects.py llama_3_1_8b_instruct --parts layer --no-completions --no-accuracy --language arabic --data-path /home/ubuntu/llm_effective_depth/data/arabic_analysis_cases.json --output-dir output/llama_3_1_8b_instruct/arabic/mutli/layer_effect/
 
-python analyze_future_effects.py qwen3_8b --parts layer --no-completions --no-accuracy --language english --data-path /home/ubuntu/llm_effective_depth/data/english_analysis_cases.json --output-dir output/qwen3_8b/english/mutli/layer_effect/
+python analyze_future_effects.py llama_3_1_8b_instruct --parts layer --no-completions --no-accuracy --language english --data-path /home/ubuntu/llm_effective_depth/data/english_analysis_cases.json --output-dir output/llama_3_1_8b_instruct/english/mutli/layer_effect/
 
-python logitlens.py qwen3_8b --language arabic --data-path /home/ubuntu/llm_effective_depth/data/arabic_analysis_cases.json --output-dir output/qwen3_8b/arabic/mutli/KL/
+python logitlens.py llama_3_1_8b_instruct --language arabic --data-path /home/ubuntu/llm_effective_depth/data/arabic_analysis_cases.json --output-dir output/llama_3_1_8b_instruct/arabic/mutli/KL/
 
-python logitlens.py qwen3_8b --language english --data-path /home/ubuntu/llm_effective_depth/data/english_analysis_cases.json --output-dir output/qwen3_8b/english/mutli/KL/
+python logitlens.py llama_3_1_8b_instruct --language english --data-path /home/ubuntu/llm_effective_depth/data/english_analysis_cases.json --output-dir output/llama_3_1_8b_instruct/english/mutli/KL/
 ```
