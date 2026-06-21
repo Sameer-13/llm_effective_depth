@@ -738,7 +738,7 @@ def _last_position_logits(saved_logits):
 # ── Main run ──────────────────────────────────────────────────────────
 
 def run(llm, model_name, parts, do_completions, do_accuracy,
-        n_examples=10, max_new_tokens=2048, output_dir="out/future_effects"):
+        n_examples=16, max_new_tokens=2048, output_dir="out/future_effects"):
     random.seed(123)
 
     target_dir = output_dir
