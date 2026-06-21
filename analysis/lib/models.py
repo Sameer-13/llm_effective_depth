@@ -15,11 +15,11 @@ local_model_table = {
     "qwen3_8b":               ("Qwen/Qwen3-8B",                  False, "language"),
     "qwen3_14b":              ("Qwen/Qwen3-14B",                 True,  "language"),
     "qwen3_32b":              ("Qwen/Qwen3-32B",                 True,  "language"),
-    "llama_3.1_8b":           ("meta-llama/Meta-Llama-3.1-8B",   True,  "language"),
+    "llama_3.1_8b":           ("meta-llama/Meta-Llama-3.1-8B",   False,  "language"),
     "llama_3.1_405b":         ("meta-llama/Meta-Llama-3.1-405B", True,  "language"),
-    "llama_3.1_8b_instruct":  ("meta-llama/Meta-Llama-3.1-8B-Instruct",  True, "language"),
+    "llama_3_1_8b_instruct":  ("meta-llama/Meta-Llama-3.1-8B-Instruct",  False, "language"),
     "llama_3.1_70b_instruct": ("meta-llama/Meta-Llama-3.1-70B-Instruct", True, "language"),
-
+    "allam-7b-instruct": ("humain-ai/ALLaM-7B-Instruct-preview", False, "language"),
     "gemma_4_e4b": ("google/gemma-4-E4B-it", False, "vision"),
 }
 
