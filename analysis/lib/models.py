@@ -19,7 +19,7 @@ local_model_table = {
     "llama_3.1_405b":         ("meta-llama/Meta-Llama-3.1-405B", True,  "language"),
     "llama_3_1_8b_instruct":  ("meta-llama/Meta-Llama-3.1-8B-Instruct",  False, "language"),
     "llama_3.1_70b_instruct": ("meta-llama/Meta-Llama-3.1-70B-Instruct", True, "language"),
-    "allam-7b-instruct": ("humain-ai/ALLaM-7B-Instruct-preview", False, "language"),
+    "allam_7b_instruct": ("humain-ai/ALLaM-7B-Instruct-preview", False, "language"),
     "gemma_4_e4b": ("google/gemma-4-E4B-it", False, "vision"),
 }
 
@@ -30,6 +30,12 @@ text_submodule_table = {
 
 def get_model(model_name):
     return remote_model_table[model_name]
+
+
+# Models whose tokenizer is SentencePiece-based (tokenizer.model file)
+# and conflicts with the transformers 5.x tiktoken auto-converter.
+# These need use_fast=False to load via the legacy Python tokenizer.
+_NEEDS_SLOW_TOKENIZER = {"allam_7b_instruct"}
 
 
 def create_model(model_name, force_local=False):
@@ -59,6 +65,15 @@ def create_model(model_name, force_local=False):
         )
         if bnb_config is not None:
             load_kwargs["quantization_config"] = bnb_config
+
+        # ── SentencePiece-tokenizer special case ────────────────────────
+        # Models like ALLaM ship a tokenizer.model file that transformers
+        # 5.x's tiktoken auto-converter can't parse, producing:
+        #   ValueError: Error parsing line b'\x0e' in tokenizer.model
+        # Forcing use_fast=False loads via the slow Python tokenizer that
+        # actually understands SentencePiece. Requires `pip install sentencepiece`.
+        if model_name in _NEEDS_SLOW_TOKENIZER:
+            load_kwargs["tokenizer_kwargs"] = {"use_fast": False}
 
         if model_type == "vision":
             model = VisionLanguageModel(model_path, **load_kwargs)

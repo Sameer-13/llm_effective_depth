@@ -8,3 +8,6 @@ huggingface-hub
 transformers
 datasets
 nnsight
+tiktoken
+sentencepiece
+protobuf
